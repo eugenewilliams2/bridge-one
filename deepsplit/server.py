@@ -213,6 +213,20 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             with open(path, "rb") as fh:
                 shutil.copyfileobj(fh, self.wfile)
+        elif u.path == "/app":
+            # serve the BRIDGE ONE console itself — one origin, no CORS anywhere
+            app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "index.html")
+            if not os.path.exists(app_path):
+                self._json(404, {"error": "index.html not found next to deepsplit/"})
+                return
+            with open(app_path, "rb") as fh:
+                body = fh.read()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif u.path == "/":
             body = (INDEX_HTML.replace("__MODEL__", MODEL)
                     .replace("__DEVICE__", DEVICE)).encode()
