@@ -36,7 +36,11 @@ if [ ! -x "\$REPO/deepsplit/.venv/bin/python" ]; then
 fi
 if ! curl -s -m 2 "http://127.0.0.1:\$PORT/health" | grep -q '"ok": true'; then
   cd "\$REPO/deepsplit" || fail "deepsplit folder missing inside \$REPO"
-  nohup .venv/bin/python server.py >/tmp/deepsplit.log 2>&1 &
+  if [ "\$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
+    nohup arch -arm64 .venv/bin/python server.py >/tmp/deepsplit.log 2>&1 &
+  else
+    nohup .venv/bin/python server.py >/tmp/deepsplit.log 2>&1 &
+  fi
   for i in \$(seq 1 40); do
     sleep 0.5
     curl -s -m 2 "http://127.0.0.1:\$PORT/health" | grep -q '"ok": true' && break

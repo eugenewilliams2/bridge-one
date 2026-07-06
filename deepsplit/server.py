@@ -12,9 +12,25 @@ Env overrides:
   BRIDGESPLIT_DEVICE  cpu | mps   (default: cpu — safest on 8 GB machines)
   BRIDGESPLIT_PORT    port (default: 8765)
 """
-import json, os, re, shutil, subprocess, sys, tempfile, threading, time
+import json, os, platform, re, shutil, subprocess, sys, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+def _ensure_native_arch():
+    """If we were launched under Rosetta (x86_64 on an Apple Silicon Mac),
+    re-exec as arm64 — the venv's compiled packages (numpy/torch) are arm64
+    and will fail to import otherwise."""
+    if sys.platform != "darwin" or platform.machine() != "x86_64":
+        return
+    try:
+        translated = subprocess.run(["sysctl", "-n", "sysctl.proc_translated"],
+                                    capture_output=True, text=True).stdout.strip()
+    except Exception:
+        translated = "0"
+    if translated == "1":
+        os.execvp("arch", ["arch", "-arm64", sys.executable] + sys.argv)
+
+_ensure_native_arch()
 
 MODEL  = os.environ.get("BRIDGESPLIT_MODEL", "htdemucs")
 DEVICE = os.environ.get("BRIDGESPLIT_DEVICE", "cpu")
@@ -43,10 +59,11 @@ def run_enhance(job_id, src_path, workdir, genre, target_lufs):
             if JOB["id"] == job_id:
                 JOB.update(state="done", pct=100, msg="master ready",
                            out=out_path, report=report)
-    except Exception as e:  # noqa: BLE001 — job errors go to the client verbatim
+    except Exception as e:  # noqa: BLE001 — job errors go to the client
+        print(f"enhance job failed: {e}", file=sys.stderr)
         with LOCK:
             if JOB["id"] == job_id:
-                JOB.update(state="error", err=str(e), msg=str(e))
+                JOB.update(state="error", err=str(e)[:240], msg=str(e)[:240])
 
 def run_job(job_id, src_path, workdir):
     out = os.path.join(workdir, "out")
@@ -74,10 +91,11 @@ def run_job(job_id, src_path, workdir):
         with LOCK:
             if JOB["id"] == job_id:
                 JOB.update(state="done", pct=100, msg="stems ready", dir=stemdir)
-    except Exception as e:  # noqa: BLE001 — job errors go to the client verbatim
+    except Exception as e:  # noqa: BLE001 — job errors go to the client
+        print(f"split job failed: {e}", file=sys.stderr)
         with LOCK:
             if JOB["id"] == job_id:
-                JOB.update(state="error", err=str(e), msg=str(e))
+                JOB.update(state="error", err=str(e)[:240], msg=str(e)[:240])
 
 INDEX_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
