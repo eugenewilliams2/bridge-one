@@ -317,7 +317,7 @@
       <div class="step"><span class="n">1</span><span>Drop your <b>stems</b> (beat, vocals, adlibs…) — or load <b>one full song</b> and hit SPLIT to pull vocals, drums, bass &amp; music apart.</span></div>
       <div class="step"><span class="n">2</span><span>Balance with the faders. M = mute, S = solo, LC = low-cut, AIR = sparkle, CMP = tighten.</span></div>
       <div class="step"><span class="n">3</span><span><b>BOUNCE → MASTER</b> sends the finished mix straight into the mastering chain.</span></div>
-      <div class="fine">Stem split is DSP separation (center-channel + transient analysis) — built for rebalancing, so a little bleed between stems is normal. Works best on stereo files.</div>
+      <div class="fine">Quick split is DSP separation (center-channel + transient analysis) — built for rebalancing, so a little bleed between stems is normal. Works best on stereo files.<span id="deepNote"></span></div>
     </div>
     <div class="stemTools">
       <button id="btnAddStems">
@@ -325,7 +325,10 @@
         ADD STEM FILES</button>
       <button id="btnSplit">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16M4 5l5 7v6l6 3v-9l5-7"/></svg>
-        SPLIT FULL TRACK</button>
+        <span id="splitLbl">SPLIT FULL TRACK</span></button>
+      <button id="btnDeepSplit" style="display:none;border-color:var(--gold-dim);color:var(--gold-hi)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
+        DEEP SPLIT (AI)</button>
     </div>
     <div id="stemList"></div>
     <div class="mixBar" id="mixBar">
@@ -384,6 +387,14 @@
         <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 4v12m0 0l-4-4m4 4l4-4"/><path d="M4 17v1a2 2 0 002 2h12a2 2 0 002-2v-1"/></svg>
         RENDER MASTER (WAV)</button>
+    </div>
+    <div class="exportRow" id="enhanceRow" style="margin-top:9px">
+      <button id="btnEnhance" style="flex:1;border-color:var(--gold-dim);color:var(--gold-hi)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
+        AI ENHANCE (DEEP ENGINE)</button>
+      <select id="genreSel" aria-label="Genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;">
+        <option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+      </select>
     </div>
 
     <div class="analysis" id="analysis">
@@ -736,6 +747,10 @@ function dspWorkerMain(){
         const wav=encodeWav24(L,R,sr,p=>prog(0.90+p*0.10,"ENCODING 24-BIT WAV"));
         postMessage({id,cmd:"done",pre,gainDb,maxGr,tp,fin,trimDb,wav},[wav]);
       }
+      else if(m.cmd==="encodewav"){
+        const wav=encodeWav24(m.L,m.R,m.sr,p=>prog(p,"ENCODING WAV"));
+        postMessage({id,cmd:"done",wav},[wav]);
+      }
       else if(m.cmd==="split"){
         const {L,R,sr}=m;
         const out=splitStems(L,R,sr,p=>prog(p,"SPLITTING STEMS (STFT + MASKS)"));
@@ -776,7 +791,7 @@ function copyCh(buf,c){ return new Float32Array(buf.getChannelData(Math.min(c,bu
 /* ---------- shared state ---------- */
 let ctx=null, buffer=null, srcNode=null, playing=false, startedAt=0, offset=0;
 let graph=null, analyser=null, grMeter={val:0};
-let fileName="", srcLufsCache=null, masterAnalysis=null;
+let fileName="", srcLufsCache=null, masterAnalysis=null, lastMasterFile=null;
 
 const $=id=>document.getElementById(id);
 const P={sub:-1.5, mid:2.5, pres:1.5, air:3, wid:2.5, drv:1.2, tgt:-9.5, ceil:-1};
@@ -894,6 +909,7 @@ async function loadFile(f){
       status("Couldn't decode <b>"+f.name+"</b>. Decoder said: <i>"+err.message+"</i><br>Try exporting as 16-bit/44.1kHz WAV or a standard MP3.");
     return;
   }
+  lastMasterFile=f;
   await setMasterBuffer(buf, f.name);
 }
 /* central entry: anything (file load, mix bounce) can become the mastering source */
@@ -908,6 +924,7 @@ async function setMasterBuffer(buf,name){
   updateChain(); updateTimeLabel(0);
   progSet(1,"READY"); setTimeout(progHide,600);
   logLine("<b>ready</b> — PLAY to preview · A/B with MASTER/SOURCE · RENDER when it knocks");
+  deepCheck(); /* show AI ENHANCE if the desktop engine is running */
 }
 
 function tick(){return new Promise(r=>setTimeout(r,30));}
@@ -1144,10 +1161,69 @@ function stopPlayback(){
 const MIX={stems:[], live:null, playing:false, startedAt:0, dur:0, analyser:null};
 const stemPicker=document.createElement("input"); stemPicker.type="file"; stemPicker.multiple=true;
 const splitPicker=document.createElement("input"); splitPicker.type="file";
+let splitMode="dsp";
 $("btnAddStems").addEventListener("click",()=>stemPicker.click());
-$("btnSplit").addEventListener("click",()=>splitPicker.click());
+$("btnSplit").addEventListener("click",()=>{splitMode="dsp";splitPicker.click();});
+$("btnDeepSplit").addEventListener("click",()=>{splitMode="ai";splitPicker.click();});
 stemPicker.addEventListener("change",()=>{ if(stemPicker.files.length) addStemFiles([...stemPicker.files]); stemPicker.value=""; });
-splitPicker.addEventListener("change",()=>{ if(splitPicker.files[0]) splitTrack(splitPicker.files[0]); splitPicker.value=""; });
+splitPicker.addEventListener("change",()=>{
+  if(splitPicker.files[0]) (splitMode==="ai"?deepSplitTrack:splitTrack)(splitPicker.files[0]);
+  splitPicker.value="";
+});
+
+/* ---------- Deep Split engine (local Demucs server, auto-detected) ---------- */
+const DEEP={url:"http://127.0.0.1:8765", ok:false, model:""};
+async function deepCheck(){
+  try{
+    const c=new AbortController(); const t=setTimeout(()=>c.abort(),1200);
+    const r=await fetch(DEEP.url+"/health",{signal:c.signal}); clearTimeout(t);
+    const j=await r.json(); DEEP.ok=!!j.ok; DEEP.model=j.model||"";
+  }catch(e){ DEEP.ok=false; }
+  $("btnDeepSplit").style.display=DEEP.ok?"":"none";
+  $("enhanceRow").style.display=DEEP.ok&&$("exportRow").classList.contains("on")?"flex":"none";
+  $("splitLbl").textContent=DEEP.ok?"QUICK SPLIT (DSP)":"SPLIT FULL TRACK";
+  $("deepNote").innerHTML=DEEP.ok
+    ? " <b style='color:var(--gold)'>AI engine online</b> (demucs/"+esc(DEEP.model)+") — DEEP SPLIT gives studio-grade isolation; takes a few minutes per song."
+    : "";
+}
+deepCheck();
+$("tabMix").addEventListener("click",deepCheck);
+async function deepSplitTrack(f){
+  logReset();
+  progShow("SENDING TO AI ENGINE",true);
+  logLine("deep split <b>"+esc(f.name)+"</b> · demucs/"+esc(DEEP.model)+" · running 100% on this machine");
+  try{
+    const r=await fetch(DEEP.url+"/split",{method:"POST",headers:{"X-Filename":f.name},body:f});
+    if(r.status===429) throw new Error("engine is busy with another song");
+    if(!r.ok) throw new Error("engine error "+r.status);
+    const {id}=await r.json();
+    const t0=performance.now();
+    await new Promise((res,rej)=>{
+      const iv=setInterval(async()=>{
+        try{
+          const s=await (await fetch(DEEP.url+"/status?id="+id)).json();
+          if(s.id!==id) return;
+          progSet(Math.max(0.02,s.pct/100),"AI SPLIT · "+String(s.msg||"working").toUpperCase());
+          if(s.state==="done"){clearInterval(iv);res();}
+          else if(s.state==="error"){clearInterval(iv);rej(new Error(s.msg||"engine error"));}
+        }catch(e){clearInterval(iv);rej(new Error("lost contact with the engine"));}
+      },1500);
+    });
+    ensureCtx();
+    const base=f.name.replace(/\.[^.]+$/,"").toUpperCase().slice(0,10);
+    const names={vocals:"VOCALS",drums:"DRUMS",bass:"BASS",other:"MUSIC"};
+    for(const k of ["vocals","drums","bass","other"]){
+      progShow("FETCHING "+names[k]+" STEM",true);
+      const ab=await (await fetch(DEEP.url+"/stem?id="+id+"&name="+k)).arrayBuffer();
+      addStem(names[k]+" AI · "+base, await decodeAudio(ctx,ab));
+    }
+    progSet(1,"DONE"); setTimeout(progHide,800);
+    logLine("<b>4 AI stems ready</b> in "+((performance.now()-t0)/1000).toFixed(0)+"s — neural isolation, mix away");
+  }catch(err){
+    progHide();
+    status("Deep split failed: "+esc(err.message)+".<br>Is the engine running? Double-click <b>Deep Split.command</b> in your bridge-one folder, keep its window open, then try again.");
+  }
+}
 
 async function addStemFiles(files){
   logReset();
@@ -1285,6 +1361,7 @@ $("btnBounce").addEventListener("click",async()=>{
     MIX.stems.forEach(s=>{ const c=buildStemChain(oac,s); c.tail.connect(bus); c.src.start(0); });
     const rendered=await oac.startRendering();
     logLine("mix bounced · "+MIX.stems.length+" stems · "+fmtTime(rendered.duration));
+    lastMasterFile=null; /* bounced audio has no source file — AI ENHANCE re-encodes it */
     await setMasterBuffer(rendered,"MIX_BOUNCE");
     switchTab("pageMaster");
   }catch(err){ progHide(); status("Bounce failed: "+err.message); }
@@ -1581,6 +1658,64 @@ $("btnExport").addEventListener("click",async()=>{
   }
   btn.disabled=false; lbl.textContent="RENDER MASTER (WAV)";
 });
+
+/* ---------- AI enhance (desktop Deep Engine) ---------- */
+$("btnEnhance").addEventListener("click",aiEnhance);
+async function aiEnhance(){
+  if(!buffer||!DEEP.ok) return;
+  stopEverything();
+  const btn=$("btnEnhance"); btn.disabled=true;
+  try{
+    logReset();
+    let body, name;
+    if(lastMasterFile){ body=lastMasterFile; name=lastMasterFile.name; }
+    else{
+      progShow("ENCODING FOR ENGINE",false);
+      const L=copyCh(buffer,0), R=copyCh(buffer,1);
+      const res=await dsp("encodewav",{L,R,sr:buffer.sampleRate},[L.buffer,R.buffer],(f,l)=>progSet(f*0.1,l));
+      body=new Blob([res.wav],{type:"audio/wav"}); name=fileName+".wav";
+    }
+    const genre=$("genreSel").value;
+    logLine("AI enhance <b>"+esc(name)+"</b> · "+genre+" · target "+P.tgt+" LUFS · demucs/"+esc(DEEP.model)+" · 100% on this machine");
+    progShow("SENDING TO DEEP ENGINE",true);
+    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(P.tgt),
+      {method:"POST",headers:{"X-Filename":name},body});
+    if(r.status===429) throw new Error("engine is busy with another song");
+    if(!r.ok) throw new Error("engine error "+r.status);
+    const {id}=await r.json();
+    await new Promise((res2,rej)=>{
+      const iv=setInterval(async()=>{
+        try{
+          const s=await (await fetch(DEEP.url+"/status?id="+id)).json();
+          if(s.id!==id) return;
+          progSet(Math.max(0.02,s.pct/100),"DEEP ENGINE · "+String(s.msg||"working").toUpperCase());
+          if(s.state==="done"){clearInterval(iv);res2();}
+          else if(s.state==="error"){clearInterval(iv);rej(new Error(s.msg||"engine error"));}
+        }catch(e){clearInterval(iv);rej(new Error("lost contact with the engine"));}
+      },1500);
+    });
+    const rep=await (await fetch(DEEP.url+"/report")).json();
+    (rep.issues||[]).forEach(i=>logLine("found: "+esc(i)));
+    (rep.actions||[]).forEach(a=>logLine(esc(a)));
+    progShow("FETCHING ENHANCED MASTER",true);
+    const ab=await (await fetch(DEEP.url+"/result")).arrayBuffer();
+    const blob=new Blob([ab],{type:"audio/wav"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=name.replace(/\.[^.]+$/,"")+"_AI_MASTER.wav";
+    a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),60000);
+    ensureCtx();
+    const buf=await decodeAudio(ctx,ab);
+    lastMasterFile=null;
+    await setMasterBuffer(buf,name.replace(/\.[^.]+$/,"")+"_AI_MASTER");
+    logLine("<b>AI master downloaded + loaded</b> · "+rep.after.lufs+" LUFS · "+rep.after.true_peak_db+" dBTP");
+    logLine("it's already mastered — A/B it here; if you re-render, use FLAT so you don't process it twice");
+  }catch(err){
+    progHide();
+    status("AI enhance failed: "+esc(err.message)+".<br>Is the engine running? Double-click <b>Deep Split.command</b> in your bridge-one folder, keep its window open, then try again.");
+  }
+  btn.disabled=false;
+}
 
 /* idle scope (repainted once webfonts arrive so canvas text uses Plex Mono) */
 if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{ if(!anyPlaying()) idleScope(); });
