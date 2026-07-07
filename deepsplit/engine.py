@@ -247,6 +247,79 @@ def excerpt(x, sr, secs=30):
     mid = n // 2
     return x[:, mid - secs * sr // 2: mid + secs * sr // 2]
 
+# ---------------------------------------------------------------- genre estimate
+# Feature centroids per genre: [sub, low-mid, presence, air, crest]. Derived from
+# the typical spectral/dynamic signature of each lane — an estimate from the
+# audio itself, not a trained model (and the user can always override it).
+GENRE_FP = {
+    "hiphop": [5.0, 1.5, -0.5, -1.0, 10.5],
+    "rnb":    [3.0, 1.0, -0.5,  0.5, 12.5],
+    "pop":    [2.0, 0.0,  0.5,  1.5, 11.0],
+}
+GENRE_W = [1.4, 0.7, 0.8, 1.2, 0.5]  # sub / air / crest discriminate most
+
+def classify_genre(m, norm):
+    feats = [region_db(norm, 35, 120), region_db(norm, 150, 400),
+             region_db(norm, 2000, 5000), region_db(norm, 9000, 16000),
+             (m["crest_db"] - 11.0)]  # centered so crest scale matches dB feats
+    fp = {g: v[:4] + [v[4] - 11.0] for g, v in GENRE_FP.items()}
+    dists = {}
+    for g, c in fp.items():
+        d = sum(GENRE_W[i] * (feats[i] - c[i]) ** 2 for i in range(5))
+        dists[g] = d
+    # softmax over negative distance → confidence
+    import math as _m
+    exps = {g: _m.exp(-d / 6.0) for g, d in dists.items()}
+    tot = sum(exps.values()) or 1.0
+    conf = {g: exps[g] / tot for g in exps}
+    best = max(conf, key=conf.get)
+    return best, round(conf[best], 2), {g: round(conf[g], 2) for g in conf}
+
+# ---------------------------------------------------------------- quality score
+def _clamp100(v):
+    return int(round(max(0.0, min(100.0, v))))
+
+def score_result(x, sr, target, src_m, target_lufs):
+    """Honest 0–100 scores from the actual measured output — every number
+    traces to a measurement, nothing is invented."""
+    _, spec = band_spectrum(x, sr)
+    nc = normalize_curve(spec)
+    # judge the broad tonal tilt, not band-to-band ripple — smooth the curve
+    # (a 5-band triangular window) before comparing to the target
+    ker = np.array([1, 2, 3, 2, 1], float); ker /= ker.sum()
+    ncs = np.convolve(nc, ker, mode="same")
+    # only judge where there's content — bands >45 dB below the loudest are empty
+    present = np.clip((spec - (spec.max() - 45)) / 10.0, 0.0, 1.0)
+    w = np.where((BAND_HZ > 50) & (BAND_HZ < 14000), 1.0, 0.4) * present
+    d = np.clip(ncs - target, -12, 12)
+    wsum = float(w.sum()) + 1e-9
+    dev = float(np.sqrt((w * d * d).sum() / wsum))
+    pres = region_db(nc, 2000, 5000)
+    mud = region_db(nc, 200, 500)
+    harsh = max(0.0, region_db(nc, 2500, 5000) - 3.0)
+    cr = crest_db(x)
+    co = correlation(x)
+    lu = lufs(x, sr)
+    tp = true_peak_db(x, sr)
+
+    # penalties kick in past a real-world mastering tolerance, so a genuinely
+    # good, on-target result reaches the 90s and only real problems drag it down
+    balance = _clamp100(100 - max(0.0, dev - 1.5) * 11)
+    clarity = _clamp100(100 - min(45.0, max(0.0, -1.0 - pres) * 10) - min(25.0, max(0.0, mud - 2.5) * 8))
+    dynamics = _clamp100(100 - max(0.0, abs(cr - 12.0) - 2.0) * 8 - max(0.0, 8.0 - cr) * 8)
+    punch = _clamp100(100 - max(0.0, src_m["crest_db"] - cr - 2.0) * 10 - max(0.0, 10.0 - cr) * 6)
+    stereo = _clamp100(100 - max(0.0, co - 0.96) * 350 - max(0.0, 0.2 - co) * 220 - max(0.0, 0.5 - co) * 30)
+    loudness = _clamp100(100 - max(0.0, abs(lu - target_lufs) - 0.5) * 14)
+    translation = _clamp100(100 - max(0.0, 0.1 - co) * 250 - harsh * 10 - max(0.0, tp) * 12)
+    depth = _clamp100(dynamics * 0.4 + stereo * 0.3 + balance * 0.3)
+    mix = _clamp100(balance * 0.30 + clarity * 0.25 + punch * 0.20 + dynamics * 0.15 + stereo * 0.10)
+    master = _clamp100(loudness * 0.25 + balance * 0.25 + translation * 0.20 + clarity * 0.15 + dynamics * 0.15)
+    overall = _clamp100(0.20 * balance + 0.20 * clarity + 0.15 * dynamics + 0.10 * punch +
+                        0.10 * stereo + 0.10 * loudness + 0.15 * translation)
+    return {"overall": overall, "mix": mix, "master": master, "clarity": clarity,
+            "punch": punch, "balance": balance, "depth": depth, "stereo": stereo,
+            "dynamics": dynamics, "loudness": loudness, "translation": translation}
+
 # ---------------------------------------------------------------- stem stage
 _sep_model = None
 def separate(x, sr, model_name, device, prog):
@@ -406,12 +479,17 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
 
     prog(2, "loading audio")
     x, sr = load_audio(path_in)
-    target = TARGETS.get(genre, TARGETS["hiphop"])
 
     prog(6, "analyzing source")
     m, norm = analyze(x, sr)
+    genre_conf, genre_scores = None, None
+    if genre == "auto" or genre not in TARGETS:
+        genre, genre_conf, genre_scores = classify_genre(m, norm)
+    target = TARGETS[genre]
     issues = detect_issues(m, norm, target)
     actions = []
+    if genre_conf is not None:
+        actions.append(f"genre auto-detected: {genre} ({int(genre_conf*100)}% confidence, from spectrum + dynamics)")
 
     if abs(m["dc_offset"]) > 0.002:
         x = x - x.mean(dim=1, keepdim=True)
@@ -470,10 +548,16 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
         "crest_db": round(crest_db(x), 1),
         "correlation": round(correlation(x), 3),
     }
+    scores = score_result(x, sr, target, m, target_lufs)
+    actions.append(f"quality score: {scores['overall']}/100 "
+                   f"(balance {scores['balance']} · clarity {scores['clarity']} · "
+                   f"punch {scores['punch']} · dynamics {scores['dynamics']} · "
+                   f"loudness {scores['loudness']} · translation {scores['translation']})")
     save_wav24(x, sr, path_out)
     prog(100, "done")
-    return {"genre": genre, "analysis": m, "issues": issues,
-            "actions": actions, "after": after}
+    return {"genre": genre, "genre_confidence": genre_conf, "genre_scores": genre_scores,
+            "analysis": m, "issues": issues, "actions": actions,
+            "after": after, "scores": scores}
 
 # ---------------------------------------------------------------- AI mix
 # Per-genre stem loudness offsets relative to the lead vocal (LUFS). These are
@@ -525,12 +609,17 @@ def aimix(path_in, stem_dir, mix_path, genre="hiphop", mix_target_lufs=-16.0,
 
     prog(2, "loading audio")
     x, sr = load_audio(path_in)
-    target = TARGETS.get(genre, TARGETS["hiphop"])
 
     prog(6, "analyzing source")
     m, norm = analyze(x, sr)
+    genre_conf, genre_scores = None, None
+    if genre == "auto" or genre not in TARGETS:
+        genre, genre_conf, genre_scores = classify_genre(m, norm)
+    target = TARGETS[genre]
     issues = detect_issues(m, norm, target)
     actions = ["ML source separation → per-stem processing → intelligent balance"]
+    if genre_conf is not None:
+        actions.append(f"genre auto-detected: {genre} ({int(genre_conf*100)}% confidence, from spectrum + dynamics)")
     if abs(m["dc_offset"]) > 0.002:
         x = x - x.mean(dim=1, keepdim=True)
         actions.append("removed DC offset")
@@ -600,6 +689,11 @@ def aimix(path_in, stem_dir, mix_path, genre="hiphop", mix_target_lufs=-16.0,
         "crest_db": round(crest_db(mix), 1),
         "correlation": round(correlation(mix), 3),
     }
+    scores = score_result(mix, sr, target, m, mix_target_lufs)
+    actions.append(f"quality score: {scores['mix']}/100 mix "
+                   f"(balance {scores['balance']} · clarity {scores['clarity']} · "
+                   f"punch {scores['punch']} · dynamics {scores['dynamics']} · stereo {scores['stereo']})")
     prog(100, "done")
-    return {"genre": genre, "analysis": m, "issues": issues, "actions": actions,
-            "balance": rec, "after": after}
+    return {"genre": genre, "genre_confidence": genre_conf, "genre_scores": genre_scores,
+            "analysis": m, "issues": issues, "actions": actions,
+            "balance": rec, "after": after, "scores": scores}

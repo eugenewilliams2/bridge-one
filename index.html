@@ -335,7 +335,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4v6m0 4v6M12 4v9m0 4v3M19 4v3m0 4v9"/><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="15" r="2" fill="currentColor"/><circle cx="19" cy="9" r="2" fill="currentColor"/></svg>
         AI MIX (AUTO-BALANCE)</button>
       <select id="mixGenreSel" aria-label="Mix genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;flex:0 0 auto">
-        <option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
     <div id="stemList"></div>
@@ -401,7 +401,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
         AI ENHANCE (DEEP ENGINE)</button>
       <select id="genreSel" aria-label="Genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;">
-        <option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
 
@@ -1274,8 +1274,10 @@ async function aiMixTrack(f){
       addStem(names[k]+" · "+base, await decodeAudio(ctx,ab), {gain:0});
     }
     progSet(1,"DONE"); setTimeout(progHide,800);
+    if(rep.genre_confidence!=null) logLine("genre: <b>"+esc(rep.genre)+"</b> (auto, "+Math.round(rep.genre_confidence*100)+"% confidence)");
     (rep.issues||[]).forEach(i=>logLine("found: "+esc(i)));
     (rep.actions||[]).forEach(a=>logLine(esc(a)));
+    if(rep.scores) logLine("<b>mix score "+rep.scores.mix+"/100</b> — clarity "+rep.scores.clarity+" · punch "+rep.scores.punch+" · dynamics "+rep.scores.dynamics+" · stereo "+rep.scores.stereo);
     logLine("<b>AI mix ready</b> in "+((performance.now()-t0)/1000).toFixed(0)+"s · "+
       rep.after.lufs+" LUFS · peak "+rep.after.peak_db+" dBFS (headroom left for mastering)");
     logLine("PLAY MIX to hear it · nudge any fader to taste · <b>BOUNCE → MASTER</b> when it's right");
@@ -1755,8 +1757,10 @@ async function aiEnhance(){
       },1500);
     });
     const rep=await (await fetch(DEEP.url+"/report")).json();
+    if(rep.genre_confidence!=null) logLine("genre: <b>"+esc(rep.genre)+"</b> (auto, "+Math.round(rep.genre_confidence*100)+"% confidence)");
     (rep.issues||[]).forEach(i=>logLine("found: "+esc(i)));
     (rep.actions||[]).forEach(a=>logLine(esc(a)));
+    if(rep.scores) logLine("<b>master score "+rep.scores.master+"/100</b> (overall "+rep.scores.overall+") — balance "+rep.scores.balance+" · clarity "+rep.scores.clarity+" · loudness "+rep.scores.loudness+" · translation "+rep.scores.translation);
     progShow("FETCHING ENHANCED MASTER",true);
     const ab=await (await fetch(DEEP.url+"/result")).arrayBuffer();
     const blob=new Blob([ab],{type:"audio/wav"});
