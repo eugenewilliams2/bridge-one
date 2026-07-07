@@ -58,6 +58,16 @@ so you can nudge anything, then **BOUNCE → MASTER** or **AI ENHANCE** to finis
 The band splitter is perfect-reconstruction (complementary subtraction — the
 bands sum back to the source at ~-126 dBFS), so unprocessed bands stay clean.
 
+**Linear-phase mode** (`?linphase=1`, or the LINEAR PHASE toggle in MASTER):
+the matching EQ and multiband splits become phase-coherent (windowed-sinc FIR
+crossovers, zero transient smearing) at the cost of a slower render. Off by
+default (minimum-phase IIR — standard and fast).
+
+**Tonal Balance meter**: every AI MIX / AI ENHANCE report includes a
+`balance_meter` payload (30 log-spaced bands: genre target, before, after)
+that the app draws as an Ozone-style curve-vs-target-pocket chart, with a
+LOW/MID/HIGH numeric readout of how far the result sits from target.
+
 Every action is listed in the report with the measured reason. On
 well-balanced material the engine does very little — by design.
 

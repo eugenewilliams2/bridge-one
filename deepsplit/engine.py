@@ -186,6 +186,18 @@ def analyze(x, sr):
         m["noise_floor_db"] = -120.0
     return m, norm
 
+def out_spectrum(x, sr):
+    """Mid-anchored long-term spectrum of a signal, for the tonal-balance meter."""
+    _, spec = band_spectrum(x, sr)
+    return [round(float(v), 2) for v in normalize_curve(spec).tolist()]
+
+def balance_meter(target, before, after):
+    """Payload the app's Tonal Balance meter draws: log-freq band centers, the
+    genre target curve, and the source (before) + processed (after) spectra."""
+    return {"hz": [round(float(f)) for f in BAND_HZ],
+            "target": [round(float(v), 2) for v in target.tolist()],
+            "before": before, "after": after}
+
 def region_db(norm, lo, hi):
     sel = (BAND_HZ >= lo) & (BAND_HZ <= hi)
     return float(norm[sel].mean())
@@ -454,14 +466,27 @@ def stage_loudness(x, sr, target_lufs, ceiling_db, actions):
     return y
 
 # ---------------------------------------------------------------- Ozone-parity
-def split_bands(x, sr, freqs):
+def fir_lowpass(fc, sr, ntaps=4097):
+    """Linear-phase windowed-sinc lowpass (constant group delay)."""
+    n = np.arange(ntaps) - (ntaps - 1) / 2
+    h = np.sinc(2 * fc / sr * n) * (2 * fc / sr) * np.hanning(ntaps)
+    h /= h.sum()
+    return torch.tensor(h, dtype=torch.float32)
+
+def split_bands(x, sr, freqs, linphase=False):
     """Perfect-reconstruction band split by complementary subtraction — the
-    bands sum back to x exactly, so unprocessed bands are transparent. Each
-    crossover is a doubled 2nd-order lowpass (~24 dB/oct)."""
+    bands sum back to x exactly, so unprocessed bands are transparent.
+    linphase=False → doubled 2nd-order IIR crossovers (~24 dB/oct, min-phase,
+    cheap). linphase=True → linear-phase windowed-sinc crossovers (phase-
+    coherent, zero smearing, slower). fft_convolve is delay-compensated, so
+    the linear-phase bands stay time-aligned and still telescope to x."""
     bands, rem = [], x
     for f in freqs:
-        lp = apply_biquad(apply_biquad(rem, *biquad("lowpass", sr, f, 0.707)),
-                          *biquad("lowpass", sr, f, 0.707))
+        if linphase:
+            lp = fft_convolve(rem, fir_lowpass(f, sr))
+        else:
+            lp = apply_biquad(apply_biquad(rem, *biquad("lowpass", sr, f, 0.707)),
+                              *biquad("lowpass", sr, f, 0.707))
         bands.append(lp)
         rem = rem - lp
     bands.append(rem)
@@ -473,11 +498,11 @@ def _band_thr(env, q=0.80):
         es = es[::es.numel() // 1_000_000]
     return float(torch.quantile(es, q))
 
-def stage_multiband_comp(x, sr, actions):
+def stage_multiband_comp(x, sr, actions, linphase=False):
     """Ozone Dynamics: 4-band compressor. Each band is tightened only where it
     peaks above its own 80th-percentile level, with gentle ratios and per-band
     timing (slow lows, fast highs). ≤4 dB GR/band."""
-    bands = split_bands(x, sr, [120, 500, 3500])
+    bands = split_bands(x, sr, [120, 500, 3500], linphase)
     names = ["low", "low-mid", "mid", "high"]
     ratio = [2.2, 2.0, 1.8, 2.0]
     atk_ms = [30, 22, 15, 8]
@@ -497,7 +522,8 @@ def stage_multiband_comp(x, sr, actions):
         out = b if out is None else out + b
     if touched:
         actions.append("multiband comp: " + ", ".join(touched) +
-                       " band(s) tightened (gentle ratio, ≤4 dB)")
+                       " band(s) tightened (gentle ratio, ≤4 dB" +
+                       (", linear phase)" if linphase else ")"))
     return out
 
 def stage_dynamic_eq(x, sr, actions):
@@ -522,12 +548,12 @@ def stage_dynamic_eq(x, sr, actions):
         actions.append(f"dynamic EQ: {f:.0f} Hz tamed only when it spikes (≤6 dB, dynamic)")
     return x
 
-def stage_multiband_image(x, sr, m, actions):
+def stage_multiband_image(x, sr, m, actions, linphase=False):
     """Ozone Imager: width per band — lows mono, mids natural, highs opened.
     Narrower sources get pushed wider; already-wide ones are left alone."""
     corr = m["correlation"]
     hi_w = 1.35 if corr > 0.9 else 1.15 if corr > 0.6 else 1.0
-    bands = split_bands(x, sr, [120, 2500])
+    bands = split_bands(x, sr, [120, 2500], linphase)
     widths = [0.0, 1.12, hi_w]          # low fully mono, mid gentle, high wide
     out = None
     for b, wd in zip(bands, widths):
@@ -535,7 +561,8 @@ def stage_multiband_image(x, sr, m, actions):
         side = (b[0] - b[1]) * 0.5 * wd
         band = torch.stack([mid + side, mid - side])
         out = band if out is None else out + band
-    actions.append(f"multiband imager: lows mono · mids natural · highs ×{hi_w:.2f} (mono-safe)")
+    actions.append(f"multiband imager: lows mono · mids natural · highs ×{hi_w:.2f} (mono-safe"
+                   + (", linear phase)" if linphase else ")"))
     return out
 
 def stage_exciter(x, sr, norm, target, actions):
@@ -557,7 +584,7 @@ def stage_exciter(x, sr, norm, target, actions):
 
 # ---------------------------------------------------------------- pipeline
 def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0,
-            use_stems=True, model="htdemucs", device="cpu", progress=None):
+            use_stems=True, model="htdemucs", device="cpu", linphase=False, progress=None):
     def prog(p, msg):
         if progress: progress(p, msg)
 
@@ -574,6 +601,8 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
     actions = []
     if genre_conf is not None:
         actions.append(f"genre auto-detected: {genre} ({int(genre_conf*100)}% confidence, from spectrum + dynamics)")
+    if linphase:
+        actions.append("linear-phase mode: matching EQ + multiband splits are phase-coherent (zero smearing, slower render)")
 
     if abs(m["dc_offset"]) > 0.002:
         x = x - x.mean(dim=1, keepdim=True)
@@ -615,7 +644,7 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
     if m["crest_db"] > 9.0:
         prog(74, "multiband compression (A/B gated)")
         s_before = quality_score(excerpt(x, sr), sr, target)
-        y = stage_multiband_comp(x, sr, actions)
+        y = stage_multiband_comp(x, sr, actions, linphase)
         if quality_score(excerpt(y, sr), sr, target) <= s_before + 0.05:
             x = y
         else:
@@ -630,7 +659,7 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
         x = stage_saturate(x, sr, actions)
 
     prog(86, "multiband stereo image")
-    x = stage_multiband_image(x, sr, m, actions)
+    x = stage_multiband_image(x, sr, m, actions, linphase)
 
     prog(90, "loudness + true-peak limiting")
     x = stage_loudness(x, sr, target_lufs, ceiling_db, actions)
@@ -647,11 +676,12 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
                    f"(balance {scores['balance']} · clarity {scores['clarity']} · "
                    f"punch {scores['punch']} · dynamics {scores['dynamics']} · "
                    f"loudness {scores['loudness']} · translation {scores['translation']})")
+    meter = balance_meter(target, m["spectrum_db"], out_spectrum(x, sr))
     save_wav24(x, sr, path_out)
     prog(100, "done")
     return {"genre": genre, "genre_confidence": genre_conf, "genre_scores": genre_scores,
             "analysis": m, "issues": issues, "actions": actions,
-            "after": after, "scores": scores}
+            "after": after, "scores": scores, "balance_meter": meter}
 
 # ---------------------------------------------------------------- AI mix
 # Per-genre stem loudness offsets relative to the lead vocal (LUFS). These are
@@ -787,7 +817,8 @@ def aimix(path_in, stem_dir, mix_path, genre="hiphop", mix_target_lufs=-16.0,
     actions.append(f"quality score: {scores['mix']}/100 mix "
                    f"(balance {scores['balance']} · clarity {scores['clarity']} · "
                    f"punch {scores['punch']} · dynamics {scores['dynamics']} · stereo {scores['stereo']})")
+    meter = balance_meter(target, m["spectrum_db"], out_spectrum(mix, sr))
     prog(100, "done")
     return {"genre": genre, "genre_confidence": genre_conf, "genre_scores": genre_scores,
             "analysis": m, "issues": issues, "actions": actions,
-            "balance": rec, "after": after, "scores": scores}
+            "balance": rec, "after": after, "scores": scores, "balance_meter": meter}

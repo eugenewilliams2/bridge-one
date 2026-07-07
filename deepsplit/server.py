@@ -42,7 +42,7 @@ JOB = {"id": None, "state": "idle", "pct": 0, "msg": "", "dir": None, "err": "",
        "type": None, "out": None, "report": None}
 LOCK = threading.Lock()
 
-def run_enhance(job_id, src_path, workdir, genre, target_lufs):
+def run_enhance(job_id, src_path, workdir, genre, target_lufs, linphase):
     out_path = os.path.join(workdir, "master.wav")
     with LOCK:
         JOB.update(state="running", pct=1, msg="starting engine")
@@ -54,7 +54,7 @@ def run_enhance(job_id, src_path, workdir, genre, target_lufs):
                     JOB.update(pct=int(pct), msg=msg)
         report = engine.enhance(src_path, out_path, genre=genre,
                                 target_lufs=target_lufs, device=DEVICE,
-                                model=MODEL, progress=prog)
+                                model=MODEL, linphase=linphase, progress=prog)
         with LOCK:
             if JOB["id"] == job_id:
                 JOB.update(state="done", pct=100, msg="master ready",
@@ -322,8 +322,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 tgt = -9.5
             tgt = min(-5.0, max(-20.0, tgt))
+            linphase = (q.get("linphase") or ["0"])[0] in ("1", "true", "yes")
             threading.Thread(target=run_enhance,
-                             args=(job_id, src, workdir, genre, tgt), daemon=True).start()
+                             args=(job_id, src, workdir, genre, tgt, linphase), daemon=True).start()
         elif u.path == "/aimix":
             try:
                 mix_lufs = float((q.get("lufs") or ["-16"])[0])

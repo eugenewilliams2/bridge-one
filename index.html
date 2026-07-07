@@ -276,6 +276,41 @@
   .refBtns{display:flex;gap:9px;margin-top:12px;flex-wrap:wrap;}
   .refBtns button{flex:1;min-width:130px;}
 
+  /* linear-phase toggle */
+  .phaseToggle{display:none;margin-top:9px;width:100%;justify-content:flex-start;gap:10px;
+    min-height:42px;border:1px solid var(--line);border-radius:8px;padding:0 14px;
+    background:linear-gradient(180deg,var(--panel-hi),var(--panel));color:var(--muted);
+    font-size:11px;letter-spacing:1.5px;cursor:pointer;transition:color .2s,border-color .2s;}
+  .phaseToggle.on{display:inline-flex;}
+  .phaseToggle .dot{width:34px;height:18px;border-radius:10px;flex:none;position:relative;
+    background:#0A0C10;border:1px solid var(--line-hi);box-shadow:inset 0 1px 3px rgba(0,0,0,.8);transition:background .2s;}
+  .phaseToggle .dot::after{content:"";position:absolute;top:1px;left:1px;width:14px;height:14px;border-radius:50%;
+    background:#4A5260;transition:transform .2s,background .2s;}
+  .phaseToggle[aria-checked="true"]{color:var(--gold-hi);border-color:var(--gold-dim);}
+  .phaseToggle[aria-checked="true"] .dot{background:linear-gradient(180deg,rgba(232,180,92,.3),rgba(232,180,92,.1));}
+  .phaseToggle[aria-checked="true"] .dot::after{transform:translateX(16px);background:var(--gold);box-shadow:0 0 8px rgba(232,180,92,.8);}
+  .phaseToggle .hint2{margin-left:auto;color:var(--dim);font-size:9px;letter-spacing:.5px;}
+  /* tonal balance meter */
+  .meterCard{display:none;margin-top:16px;background:linear-gradient(180deg,var(--panel-hi),var(--panel) 30%);
+    border:1px solid var(--line);border-top-color:var(--line-hi);border-radius:12px;padding:14px 16px;
+    box-shadow:0 10px 26px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.045);}
+  .meterCard.on{display:block;}
+  .meterCard h2{font-family:'Saira Condensed';font-weight:600;font-size:12px;letter-spacing:4px;color:var(--gold-dim);
+    margin:0 0 12px;display:flex;align-items:center;gap:12px;}
+  .mlegend{display:flex;gap:12px;margin-left:auto;}
+  .lk{font-size:8.5px;letter-spacing:1.5px;color:var(--muted);display:inline-flex;align-items:center;gap:5px;}
+  .lk::before{content:"";width:13px;height:2.5px;border-radius:2px;}
+  .lk.tgt::before{background:var(--green);box-shadow:0 0 6px rgba(87,217,163,.7);}
+  .lk.bef::before{background:#5A6270;height:0;border-top:2px dashed #5A6270;}
+  .lk.aft::before{background:var(--gold);box-shadow:0 0 6px rgba(232,180,92,.8);}
+  #meterCv{height:190px;}
+  .mrows{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:11px;}
+  .mrows .mb{background:linear-gradient(180deg,#0A0C10,#07090C);border:1px solid var(--line);border-radius:7px;
+    padding:8px 10px;box-shadow:inset 0 2px 8px rgba(0,0,0,.7);}
+  .mrows .mb .k{color:var(--muted);font-size:8.5px;letter-spacing:1.5px;}
+  .mrows .mb .v{font-size:13px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums;}
+  .mrows .mb .v.ok{color:var(--green);} .mrows .mb .v.warn{color:var(--gold);} .mrows .mb .v.hot{color:var(--red);}
+
   .foot{margin-top:24px;text-align:center;color:#4A5260;font-size:8.5px;letter-spacing:3px;line-height:1.9;}
   @media (prefers-reduced-motion: reduce){ *{transition:none!important;animation:none!important;} }
 </style>
@@ -404,6 +439,10 @@
         <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
+    <button class="phaseToggle" id="btnLinphase" role="switch" aria-checked="false" aria-label="Linear-phase processing">
+      <span class="dot"></span><span>LINEAR PHASE</span>
+      <span class="hint2">phase-coherent · zero smearing · slower render</span>
+    </button>
 
     <div class="analysis" id="analysis">
       <h2>SOURCE ANALYSIS</h2>
@@ -437,6 +476,18 @@
   </div>
   <div class="chain" id="chain"></div>
   <div class="status" id="status" aria-live="polite"></div>
+
+  <div class="meterCard" id="balanceMeter">
+    <h2>TONAL BALANCE
+      <span class="mlegend">
+        <span class="lk tgt">TARGET</span><span class="lk bef">BEFORE</span><span class="lk aft">AFTER</span>
+      </span>
+    </h2>
+    <div class="glass" style="padding:8px">
+      <canvas id="meterCv" width="1280" height="440" role="img" aria-label="Tonal balance: frequency curve before and after processing against the genre target"></canvas>
+    </div>
+    <div class="mrows" id="mrows"></div>
+  </div>
 
   <div class="foot">BRIDGE ONE MK III · MIX · MASTER · REFERENCE · ITU-R BS.1770-4 · 4× OVERSAMPLED TRUE-PEAK<br>OFF-THREAD DSP CORE · STEM SPLIT ENGINE · HANDCRAFTED FOR GQ</div>
 </div>
@@ -1183,6 +1234,11 @@ splitPicker.addEventListener("change",()=>{
 
 /* ---------- Deep Split engine (local Demucs server, auto-detected) ---------- */
 const DEEP={url:"http://127.0.0.1:8765", ok:false, model:""};
+let linphase=false;
+$("btnLinphase").addEventListener("click",()=>{
+  linphase=!linphase;
+  $("btnLinphase").setAttribute("aria-checked",linphase?"true":"false");
+});
 async function deepCheck(){
   try{
     const c=new AbortController(); const t=setTimeout(()=>c.abort(),1200);
@@ -1192,6 +1248,7 @@ async function deepCheck(){
   $("btnDeepSplit").style.display=DEEP.ok?"":"none";
   $("aiMixRow").style.display=DEEP.ok?"flex":"none";
   $("enhanceRow").style.display=DEEP.ok&&$("exportRow").classList.contains("on")?"flex":"none";
+  $("btnLinphase").classList.toggle("on",DEEP.ok&&$("exportRow").classList.contains("on"));
   $("splitLbl").textContent=DEEP.ok?"QUICK SPLIT (DSP)":"SPLIT FULL TRACK";
   $("deepNote").innerHTML=DEEP.ok
     ? " <b style='color:var(--gold)'>AI engine online</b> (demucs/"+esc(DEEP.model)+") — DEEP SPLIT gives studio-grade isolation; takes a few minutes per song."
@@ -1278,6 +1335,7 @@ async function aiMixTrack(f){
     (rep.issues||[]).forEach(i=>logLine("found: "+esc(i)));
     (rep.actions||[]).forEach(a=>logLine(esc(a)));
     if(rep.scores) logLine("<b>mix score "+rep.scores.mix+"/100</b> — clarity "+rep.scores.clarity+" · punch "+rep.scores.punch+" · dynamics "+rep.scores.dynamics+" · stereo "+rep.scores.stereo);
+    if(rep.balance_meter) renderBalanceMeter(rep.balance_meter);
     logLine("<b>AI mix ready</b> in "+((performance.now()-t0)/1000).toFixed(0)+"s · "+
       rep.after.lufs+" LUFS · peak "+rep.after.peak_db+" dBFS (headroom left for mastering)");
     logLine("PLAY MIX to hear it · nudge any fader to taste · <b>BOUNCE → MASTER</b> when it's right");
@@ -1738,9 +1796,9 @@ async function aiEnhance(){
       body=new Blob([res.wav],{type:"audio/wav"}); name=fileName+".wav";
     }
     const genre=$("genreSel").value;
-    logLine("AI enhance <b>"+esc(name)+"</b> · "+genre+" · target "+P.tgt+" LUFS · demucs/"+esc(DEEP.model)+" · 100% on this machine");
+    logLine("AI enhance <b>"+esc(name)+"</b> · "+genre+" · target "+P.tgt+" LUFS"+(linphase?" · linear phase":"")+" · demucs/"+esc(DEEP.model)+" · 100% on this machine");
     progShow("SENDING TO DEEP ENGINE",true);
-    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(P.tgt),
+    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(P.tgt)+"&linphase="+(linphase?1:0),
       {method:"POST",headers:{"X-Filename":name},body});
     if(r.status===429) throw new Error("engine is busy with another song");
     if(!r.ok) throw new Error("engine error "+r.status);
@@ -1761,6 +1819,7 @@ async function aiEnhance(){
     (rep.issues||[]).forEach(i=>logLine("found: "+esc(i)));
     (rep.actions||[]).forEach(a=>logLine(esc(a)));
     if(rep.scores) logLine("<b>master score "+rep.scores.master+"/100</b> (overall "+rep.scores.overall+") — balance "+rep.scores.balance+" · clarity "+rep.scores.clarity+" · loudness "+rep.scores.loudness+" · translation "+rep.scores.translation);
+    if(rep.balance_meter) renderBalanceMeter(rep.balance_meter);
     progShow("FETCHING ENHANCED MASTER",true);
     const ab=await (await fetch(DEEP.url+"/result")).arrayBuffer();
     const blob=new Blob([ab],{type:"audio/wav"});
@@ -1779,6 +1838,50 @@ async function aiEnhance(){
     status("AI enhance failed: "+esc(err.message)+".<br>Is the engine running? Double-click <b>Deep Split.command</b> in your bridge-one folder, keep its window open, then try again.");
   }
   btn.disabled=false;
+}
+
+/* ---------- Tonal Balance meter (Ozone-style) ---------- */
+let lastMeter=null;
+function meterBandAvg(hz,vals,lo,hi){
+  let s=0,n=0; for(let i=0;i<hz.length;i++) if(hz[i]>=lo&&hz[i]<=hi){s+=vals[i];n++;} return n?s/n:0;
+}
+function renderBalanceMeter(d){
+  lastMeter=d;
+  $("balanceMeter").classList.add("on");
+  const cv=$("meterCv"), c=cv.getContext("2d"), W=cv.width, H=cv.height;
+  const F0=20, F1=20000, DBMIN=-24, DBMAX=14, TOL=2.5;
+  const xr=f=>Math.log(f/F0)/Math.log(F1/F0)*W;
+  const yv=v=>H-(Math.max(DBMIN,Math.min(DBMAX,v))-DBMIN)/(DBMAX-DBMIN)*H;
+  c.fillStyle="#05070A"; c.fillRect(0,0,W,H);
+  /* grid */
+  c.strokeStyle="rgba(255,255,255,.05)"; c.lineWidth=1; c.fillStyle="#3A424F"; c.font="15px 'IBM Plex Mono'";
+  [ -18,-12,-6,0,6,12 ].forEach(db=>{const y=yv(db);c.beginPath();c.moveTo(0,y);c.lineTo(W,y);c.stroke();
+    c.fillText((db>0?"+":"")+db, 4, y-3);});
+  const FL=[[50,"50"],[100,"100"],[200,"200"],[500,"500"],[1000,"1k"],[2000,"2k"],[5000,"5k"],[10000,"10k"]];
+  FL.forEach(([f,l])=>{const x=xr(f);c.strokeStyle="rgba(255,255,255,.04)";c.beginPath();c.moveTo(x,0);c.lineTo(x,H);c.stroke();
+    c.fillStyle="#4A5260";c.fillText(l,x+3,H-6);});
+  const curve=(vals)=>{c.beginPath();for(let i=0;i<d.hz.length;i++){const x=xr(d.hz[i]),y=yv(vals[i]);i?c.lineTo(x,y):c.moveTo(x,y);}};
+  /* target pocket (confidence band) */
+  c.beginPath();
+  for(let i=0;i<d.hz.length;i++){const x=xr(d.hz[i]);i?c.lineTo(x,yv(d.target[i]+TOL)):c.moveTo(x,yv(d.target[i]+TOL));}
+  for(let i=d.hz.length-1;i>=0;i--){const x=xr(d.hz[i]);c.lineTo(x,yv(d.target[i]-TOL));}
+  c.closePath(); c.fillStyle="rgba(87,217,163,.13)"; c.fill();
+  /* target centerline */
+  curve(d.target); c.strokeStyle="rgba(87,217,163,.7)"; c.lineWidth=2; c.setLineDash([]); c.stroke();
+  /* before (dashed, muted) */
+  curve(d.before); c.strokeStyle="#6B7482"; c.lineWidth=2; c.setLineDash([7,6]); c.stroke(); c.setLineDash([]);
+  /* after (bold gold, glow) */
+  curve(d.after); c.strokeStyle="#E8B45C"; c.lineWidth=3.5;
+  c.shadowColor="rgba(232,180,92,.6)"; c.shadowBlur=10; c.stroke(); c.shadowBlur=0;
+  /* numeric readout (accessibility / data alternative) */
+  const bands=[["LOW","35-160"],["MID","300-3k"],["HIGH","8k-16k"]];
+  const rng={LOW:[35,160],MID:[300,3000],HIGH:[8000,16000]};
+  $("mrows").innerHTML=bands.map(([k,lbl])=>{
+    const a=meterBandAvg(d.hz,d.after,...rng[k]), t=meterBandAvg(d.hz,d.target,...rng[k]);
+    const dl=a-t, cls=Math.abs(dl)<=TOL?"ok":Math.abs(dl)<=TOL*2?"warn":"hot";
+    const sign=dl>0?"+":"";
+    return `<div class="mb"><div class="k">${k} · ${lbl} Hz</div><div class="v ${cls}">${sign}${dl.toFixed(1)} dB vs target</div></div>`;
+  }).join("");
 }
 
 /* idle scope (repainted once webfonts arrive so canvas text uses Plex Mono) */
