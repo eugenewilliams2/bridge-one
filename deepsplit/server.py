@@ -287,6 +287,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/adjust":
             self._handle_adjust()
             return
+        if u.path == "/fx":
+            self._handle_fx()
+            return
         if u.path not in ("/split", "/enhance", "/aimix"):
             self._json(404, {"error": "not found"})
             return
@@ -340,6 +343,64 @@ class Handler(BaseHTTPRequestHandler):
         else:
             threading.Thread(target=run_job, args=(job_id, src, workdir), daemon=True).start()
         self._json(200, {"id": job_id})
+
+    def _handle_fx(self):
+        """Apply one FX op (dereverb/reverb) to an uploaded stem and return the
+        processed WAV. Stem-level — no loudness normalize, so the mix balance is
+        preserved; just a peak guard against clipping the encode."""
+        with LOCK:
+            busy = JOB["state"] == "running"
+        if busy:
+            self._json(429, {"error": "engine busy — wait for the current job"})
+            return
+        q = parse_qs(urlparse(self.path).query)
+        op = (q.get("op") or [""])[0]
+        if op not in ("dereverb", "reverb"):
+            self._json(400, {"error": "op must be dereverb or reverb"})
+            return
+        try:
+            amt = float((q.get("amt") or ["0.5"])[0]); amt = min(1.0, max(0.05, amt))
+            size = float((q.get("size") or ["1.0"])[0]); size = min(2.0, max(0.2, size))
+        except ValueError:
+            amt, size = 0.5, 1.0
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_UPLOAD:
+            self._json(400, {"error": "bad upload size"})
+            return
+        src = tempfile.mktemp(suffix=".wav")
+        out = tempfile.mktemp(suffix=".wav")
+        remaining, chunk = length, 1 << 20
+        with open(src, "wb") as fh:
+            while remaining > 0:
+                data = self.rfile.read(min(chunk, remaining))
+                if not data:
+                    break
+                fh.write(data); remaining -= len(data)
+        try:
+            import engine
+            x, sr = engine.load_audio(src)
+            y = (engine.stage_dereverb(x, sr, amt) if op == "dereverb"
+                 else engine.stage_reverb(x, sr, amt, size))
+            pk = float(y.abs().max())
+            if pk > 0.99:
+                y = y * (0.99 / pk)
+            engine.save_wav24(y, sr, out)
+            with open(out, "rb") as fh:
+                body = fh.read()
+        except Exception as e:  # noqa: BLE001
+            print(f"fx failed: {e}", file=sys.stderr)
+            self._json(500, {"error": str(e)[:240]})
+            return
+        finally:
+            for p in (src, out):
+                try: os.unlink(p)
+                except OSError: pass
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_adjust(self):
         """Synchronous cleanup: apply chat-derived ops to the current AI master

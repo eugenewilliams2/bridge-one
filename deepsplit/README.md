@@ -13,6 +13,9 @@ own drag-and-drop UI, and BRIDGE ONE (`index.html`) auto-detects the engine:
 
 - MIX tab grows a **DEEP SPLIT (AI)** button — neural VOCALS/DRUMS/BASS/MUSIC
 - MIX tab grows an **AI MIX (AUTO-BALANCE)** button — full auto-mix
+- each MIX stem grows **DRY** / **VERB** buttons — per-stem de-reverb / add
+  reverb (routes the single stem through the engine; far cleaner on an
+  isolated vocal than bus-level). `POST /fx?op=dereverb|reverb&amt=&size=`
 - MASTER tab grows an **AI ENHANCE (DEEP ENGINE)** button — full auto-master
 
 ## What AI MIX actually does

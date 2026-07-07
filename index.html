@@ -206,6 +206,7 @@
   .tgl.solo.onb{border-color:var(--green);color:var(--green);
     background:linear-gradient(180deg,rgba(87,217,163,.14),rgba(87,217,163,.03));
     box-shadow:0 0 12px rgba(87,217,163,.16), inset 0 1px 0 rgba(255,255,255,.06);}
+  .tgl.fx{border-color:var(--gold-dim);color:var(--gold-hi);}
   .mixBar{display:none;margin-top:14px;gap:9px;align-items:center;flex-wrap:wrap;}
   .mixBar.on{display:flex;}
   #mixTime{color:var(--muted);font-size:11px;min-width:50px;}
@@ -1424,6 +1425,8 @@ function renderStems(){
       '<button class="tgl'+(s.lowcut?" onb":"")+'" data-k="lowcut" aria-pressed="'+s.lowcut+'" title="Low cut 80 Hz">LC</button>'+
       '<button class="tgl'+(s.air?" onb":"")+'" data-k="air" aria-pressed="'+s.air+'" title="Air shelf +2.5 dB">AIR</button>'+
       '<button class="tgl'+(s.comp?" onb":"")+'" data-k="comp" aria-pressed="'+s.comp+'" title="Compressor">CMP</button>'+
+      (DEEP.ok?'<button class="tgl fx" data-k="dry" title="De-reverb this stem (dry it up)">DRY</button>'+
+               '<button class="tgl fx" data-k="verb" title="Add reverb / space to this stem">VERB</button>':'')+
       '<button class="tgl" data-k="del" aria-label="Remove stem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:11px;height:11px"><path d="M6 6l12 12M18 6L6 18"/></svg></button>'+
       '</span></div>'+
       '<div class="frow"><span class="fl">GAIN</span><span class="fv" data-v="gain">'+fmtDb(s.gain)+'</span></div>'+
@@ -1433,6 +1436,8 @@ function renderStems(){
     el.querySelectorAll(".tgl").forEach(b=>b.addEventListener("click",()=>{
       const k=b.dataset.k;
       if(k==="del"){removeStem(i);return;}
+      if(k==="dry"){stemFx(i,"dereverb",b);return;}
+      if(k==="verb"){stemFx(i,"reverb",b);return;}
       s[k]=!s[k];
       b.classList.toggle("onb",s[k]); b.setAttribute("aria-pressed",s[k]);
       mixLiveUpdate();
@@ -1449,6 +1454,34 @@ function renderStems(){
   });
   $("mixBar").classList.toggle("on",MIX.stems.length>0);
   $("mixHint").style.display=MIX.stems.length?"none":"";
+}
+/* per-stem FX: route this stem through the Deep Engine (de-reverb / add reverb).
+   Applies to the current buffer (repeat presses compound), then re-plays live. */
+let stemFxBusy=false;
+async function stemFx(i,op,btn){
+  if(stemFxBusy||!DEEP.ok) return;
+  const s=MIX.stems[i]; if(!s) return;
+  stemFxBusy=true;
+  const label=op==="dereverb"?"DRY":"VERB", old=btn.textContent;
+  btn.textContent="…"; btn.classList.add("onb");
+  try{
+    ensureCtx();
+    const L=copyCh(s.buffer,0), R=copyCh(s.buffer,1), sr=s.buffer.sampleRate;
+    const enc=await dsp("encodewav",{L,R,sr},[L.buffer,R.buffer]);
+    const amt=op==="dereverb"?0.55:0.45;
+    const r=await fetch(DEEP.url+"/fx?op="+op+"&amt="+amt,
+      {method:"POST",headers:{"X-Filename":"stem.wav"},body:new Blob([enc.wav],{type:"audio/wav"})});
+    if(r.status===429) throw new Error("engine busy");
+    if(!r.ok) throw new Error("engine error "+r.status);
+    const ab=await r.arrayBuffer();
+    s.buffer=await decodeAudio(ctx,ab);
+    logLine((op==="dereverb"?"dried up":"added space to")+" <b>"+esc(s.name)+"</b> — press again for more");
+    const wasPlaying=MIX.playing; if(wasPlaying){ mixStop(); mixPlay(); }
+  }catch(err){
+    logLine("stem FX failed on <b>"+esc(s.name)+"</b> — "+esc(err.message));
+  }
+  btn.textContent=old; btn.classList.remove("onb");
+  stemFxBusy=false;
 }
 function panLbl(p){return p===0?"C":(p<0?"L":"R")+Math.round(Math.abs(p)*100);}
 function stemAudible(s){
