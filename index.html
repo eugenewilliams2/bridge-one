@@ -311,6 +311,34 @@
   .mrows .mb .v{font-size:13px;font-weight:600;margin-top:3px;font-variant-numeric:tabular-nums;}
   .mrows .mb .v.ok{color:var(--green);} .mrows .mb .v.warn{color:var(--gold);} .mrows .mb .v.hot{color:var(--red);}
 
+  /* master chat */
+  .chatPanel{display:none;margin-top:16px;background:linear-gradient(180deg,var(--panel-hi),var(--panel) 30%);
+    border:1px solid var(--line);border-top-color:var(--line-hi);border-radius:12px;padding:14px 16px;
+    box-shadow:0 10px 26px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.045);}
+  .chatPanel.on{display:block;}
+  .chatPanel h2{font-family:'Saira Condensed';font-weight:600;font-size:12px;letter-spacing:4px;color:var(--gold-dim);
+    margin:0 0 12px;display:flex;align-items:center;}
+  .chatLog{max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:2px;}
+  .cbub{max-width:88%;padding:9px 12px;border-radius:11px;font-size:11.5px;line-height:1.55;}
+  .cbub.user{align-self:flex-end;background:linear-gradient(180deg,rgba(232,180,92,.16),rgba(232,180,92,.06));
+    border:1px solid var(--gold-dim);color:var(--gold-hi);border-bottom-right-radius:3px;}
+  .cbub.bot{align-self:flex-start;background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--ink);
+    border-bottom-left-radius:3px;}
+  .cbub.bot b{color:var(--gold);} .cbub.bot .mini{color:var(--muted);font-size:10px;}
+  .cbub.bot.err{border-color:rgba(255,93,93,.4);color:#FFB4B4;}
+  .chatChips{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px;}
+  .cchip{min-height:34px;padding:0 11px;font-size:10.5px;letter-spacing:.5px;border-radius:16px;color:var(--muted);
+    border:1px solid var(--line);background:linear-gradient(180deg,var(--panel-hi),var(--panel));cursor:pointer;
+    transition:color .2s,border-color .2s;}
+  .cchip:hover{color:var(--gold-hi);border-color:var(--gold-dim);}
+  .chatInputRow{display:flex;gap:9px;margin-top:11px;}
+  .chatInputRow input{flex:1;min-height:46px;border-radius:8px;border:1px solid var(--line-hi);background:var(--glass);
+    color:var(--ink);font-family:'IBM Plex Mono',monospace;font-size:12px;padding:0 13px;box-shadow:inset 0 2px 8px rgba(0,0,0,.7);}
+  .chatInputRow input::placeholder{color:var(--dim);}
+  .chatInputRow input:focus-visible{border-color:var(--gold);box-shadow:inset 0 2px 8px rgba(0,0,0,.7),var(--focus);}
+  .chatInputRow button{min-width:52px;border-color:var(--gold-dim);color:var(--gold-hi);}
+  .chatInputRow button svg{width:16px;height:16px;fill:none;}
+
   .foot{margin-top:24px;text-align:center;color:#4A5260;font-size:8.5px;letter-spacing:3px;line-height:1.9;}
   @media (prefers-reduced-motion: reduce){ *{transition:none!important;animation:none!important;} }
 </style>
@@ -443,6 +471,24 @@
       <span class="dot"></span><span>LINEAR PHASE</span>
       <span class="hint2">phase-coherent · zero smearing · slower render</span>
     </button>
+
+    <div class="chatPanel" id="masterChat">
+      <h2>MASTER CHAT
+        <span style="margin-left:auto;font-size:8.5px;color:var(--dim);letter-spacing:1px">tell me what to fix · 100% local</span>
+      </h2>
+      <div class="chatLog" id="chatLog" aria-live="polite"></div>
+      <div class="chatChips" id="chatChips">
+        <button class="cchip">less low end</button><button class="cchip">open up the top</button>
+        <button class="cchip">tame the harshness</button><button class="cchip">a bit wider</button>
+        <button class="cchip">clean up the mud</button><button class="cchip">reset</button><button class="cchip">save</button>
+      </div>
+      <div class="chatInputRow">
+        <input type="text" id="chatIn" placeholder="e.g. low end's too heavy, brighten it, tame the harsh vocals" aria-label="Tell the master what to fix" autocomplete="off">
+        <button id="chatSend" aria-label="Send message">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12l16-8-6 16-3-7-7-1z"/></svg>
+        </button>
+      </div>
+    </div>
 
     <div class="analysis" id="analysis">
       <h2>SOURCE ANALYSIS</h2>
@@ -1832,7 +1878,8 @@ async function aiEnhance(){
     lastMasterFile=null;
     await setMasterBuffer(buf,name.replace(/\.[^.]+$/,"")+"_AI_MASTER");
     logLine("<b>AI master downloaded + loaded</b> · "+rep.after.lufs+" LUFS · "+rep.after.true_peak_db+" dBTP");
-    logLine("it's already mastered — A/B it here; if you re-render, use FLAT so you don't process it twice");
+    logLine("it's mastered — A/B it, or use <b>MASTER CHAT</b> below to fine-tune it in plain English");
+    showMasterChat(rep.genre);
   }catch(err){
     progHide();
     status("AI enhance failed: "+esc(err.message)+".<br>Is the engine running? Double-click <b>Deep Split.command</b> in your bridge-one folder, keep its window open, then try again.");
@@ -1883,6 +1930,164 @@ function renderBalanceMeter(d){
     return `<div class="mb"><div class="k">${k} · ${lbl} Hz</div><div class="v ${cls}">${sign}${dl.toFixed(1)} dB vs target</div></div>`;
   }).join("");
 }
+
+/* ============================================================
+   MASTER CHAT — local natural-language cleanup after AI ENHANCE
+   ============================================================ */
+/* cumulative, structured so successive notes compound cleanly and reset works.
+   All ops are re-applied to the ORIGINAL AI master each send (no gen loss). */
+let chat={eq:{}, width:1.0, deess:0, drive:1.0, tgt:null, notes:0};
+function chatReset(){ chat={eq:{}, width:1.0, deess:0, drive:1.0, tgt:P.tgt, notes:0}; }
+function chatOps(){
+  const ops=[];
+  for(const k in chat.eq){
+    const [type,f,q]=k.split("|");
+    const g=Math.max(-8,Math.min(8,chat.eq[k]));
+    if(Math.abs(g)<0.1) continue;
+    ops.push(type==="bell"?{type,f:+f,q:+q,gain:+g.toFixed(1)}:{type,f:+f,gain:+g.toFixed(1)});
+  }
+  if(Math.abs(chat.width-1)>0.02) ops.push({type:"width",mult:+chat.width.toFixed(2)});
+  if(chat.deess>0.05) ops.push({type:"deess",amt:+chat.deess.toFixed(2)});
+  if(chat.drive>1.02) ops.push({type:"saturate",drive:+chat.drive.toFixed(2)});
+  return ops;
+}
+function eqAdd(type,f,q,g){ const k=type+"|"+f+"|"+(q||0); chat.eq[k]=(chat.eq[k]||0)+g; }
+
+/* intent rules — parsed per clause so mixed directions in one sentence
+   ("low end's too heavy, open up the top") each resolve independently */
+function parseMasterChat(text){
+  const g=" "+text.toLowerCase().replace(/[^a-z0-9 %+-]/g," ")+" ";
+  if(/\b(reset|start over|revert|undo all|clear it|clear all|original)\b/.test(g)) return {cmd:"reset"};
+  if(/\b(save|download|export|bounce|render|final|the file|give it to me)\b/.test(g)) return {cmd:"save"};
+  const applied=[]; let hit=false;
+  const clauses=text.toLowerCase().split(/[,;.]|\band\b|\bbut\b|\bthen\b|\balso\b|\bplus\b|\bwith\b/);
+  for(const clause of clauses){
+    if(!clause.trim()) continue;
+    const t=" "+clause.replace(/[^a-z0-9 %+-]/g," ")+" ";
+    let mag=1;
+    if(/\b(slightly|subtle|subtly|gently|a little|a bit|a touch|little|tad|hair)\b/.test(t)) mag=0.6;
+    if(/\b(way|much|a lot|lot|really|very|super|too|way too)\b/.test(t)) mag=1.7;
+    const more=/\b(more|add|boost|bring up|give|extra|up|increase|open up|open it up|need more|want more)\b/.test(t);
+    const less=/\b(less|reduce|cut|lower|drop|pull back|take out|remove|tame|down|too|less of|kill|ease|off|tight|tighten|control|clean up the)\b/.test(t);
+    const dir=(def)=> less?-1 : more?1 : def;   // def when no explicit direction
+    if(processClause(t,mag,dir,applied)) hit=true;
+  }
+  return {cmd:"adjust", applied, unknown:!hit};
+}
+function processClause(t,mag,dir,applied){
+  let hit=false;
+  const R=[
+    // tonal
+    [/\b(bass|low end|low-end|lows|sub bass|808|808s|bottom|low freq)/, ()=>{const d=dir(1);eqAdd("lowshelf",80,0,2.2*mag*d);applied.push((d>0?"added":"pulled back")+" low end")}],
+    [/\b(boom|boomy|rumble|too much low|muddy low|woofy)/, ()=>{eqAdd("lowshelf",90,0,-2.5*mag);applied.push("tightened the boomy low end")}],
+    [/\b(warm|warmth|body|fuller|thicker|thickness|weight|meat)/, ()=>{const d=dir(1);eqAdd("lowshelf",150,0,1.7*mag*d);applied.push((d>0?"added warmth/body":"reduced body")) }],
+    [/\b(thin|thinner|weak|no body|hollow|tinny|small)/, ()=>{eqAdd("lowshelf",150,0,1.7*mag);applied.push("added body to fill it out")}],
+    [/\b(mud|muddy|muddiness|cloudy|congested|murky)/, ()=>{eqAdd("bell",300,1.2,-2.3*mag);applied.push("cleared mud around 300 Hz")}],
+    [/\b(boxy|box|cardboard)/, ()=>{eqAdd("bell",500,1.2,-2*mag);applied.push("cut boxiness at 500 Hz")}],
+    [/\b(honky|nasal|nasally|telephone)/, ()=>{eqAdd("bell",1000,1.3,-2*mag);applied.push("eased the honky 1 kHz")}],
+    [/\b(harsh|harshness|piercing|shrill|abrasive|fatiguing|ear splitting|edgy|brittle)/, ()=>{eqAdd("bell",3500,1.1,-2*mag);chat.deess=Math.max(chat.deess,0.4*mag);applied.push("tamed the harshness (3–4 kHz + de-ess)")}],
+    [/\b(presence|forward|upfront|up front|in your face|clarity|cut through|intelligib)/, ()=>{const d=dir(1);eqAdd("bell",3500,1.0,2*mag*d);applied.push((d>0?"pushed presence forward":"pulled presence back"))}],
+    [/\b(bright|brighter|air|airy|open|openness|crisp|sparkle|shine|shimmer|top end|highs|treble|sizzle)/, ()=>{const d=dir(1);eqAdd("highshelf",10000,0,2.2*mag*d);applied.push((d>0?"opened up the top / added air":"took some air off the top"))}],
+    [/\b(dull|dark|darker|muffled|veiled|no air|closed|lifeless|dead top)/, ()=>{eqAdd("highshelf",10000,0,2.2*mag);applied.push("brightened the dull top end")}],
+    [/\b(sibilan|essy|de-?ess|harsh s|spitty|too much s|ess |sss)/, ()=>{chat.deess=Math.max(chat.deess,0.6*mag);applied.push("de-essed the sibilance")}],
+    // stereo
+    [/\b(wide|wider|width|spacious|big stereo|open stereo|stereo|huge|expand)/, ()=>{const d=dir(1);chat.width=Math.max(0.5,Math.min(1.6,chat.width*(1+0.14*mag*d)));applied.push((d>0?"widened the stereo image":"narrowed the stereo image"))}],
+    [/\b(narrow|narrower|mono|centered|center|tighten stereo|less wide|focus|collapse)/, ()=>{chat.width=Math.max(0.5,Math.min(1.6,chat.width*(1-0.14*mag)));applied.push("narrowed the image / more mono")}],
+    // loudness
+    [/\b(loud|louder|hotter|competitive|turn up|bang|slam it|hits harder|volume up)/, ()=>{chat.tgt=Math.max(-16,Math.min(-6,(chat.tgt??P.tgt)+1*mag));applied.push("pushed loudness up to "+chat.tgt.toFixed(1)+" LUFS")}],
+    [/\b(quiet|quieter|less loud|turn down|softer|too loud|back off|volume down|dynamic)/, ()=>{chat.tgt=Math.max(-16,Math.min(-6,(chat.tgt??P.tgt)-1*mag));applied.push("eased loudness to "+chat.tgt.toFixed(1)+" LUFS")}],
+    // character
+    [/\b(punch|punchy|punchier|impact|hit harder|slam|smack|aggressive|drive|grit|glue)/, ()=>{chat.drive=Math.max(1,Math.min(1.4,chat.drive+0.1*mag));applied.push("added punch/drive")}],
+    [/\b(clean|cleaner|clean.?up|tidy|polish|declutter|professional)/, ()=>{eqAdd("bell",320,1.2,-1.6*mag);chat.deess=Math.max(chat.deess,0.4*mag);applied.push("cleaned it up (mud + de-ess)")}],
+    [/\b(smooth|smoother|gentle|soften|round off|silky)/, ()=>{chat.deess=Math.max(chat.deess,0.4*mag);eqAdd("highshelf",11000,0,-1*mag);applied.push("smoothed the top")}],
+  ];
+  for(const [re,fn] of R) if(re.test(t)){ fn(); hit=true; }
+  return hit;
+}
+
+function chatSay(role,html){
+  const b=document.createElement("div"); b.className="cbub "+role;
+  b.innerHTML=html; $("chatLog").appendChild(b);
+  $("chatLog").scrollTop=$("chatLog").scrollHeight;
+  return b;
+}
+let chatBusy=false;
+async function sendChat(text){
+  text=(text||"").trim(); if(!text||chatBusy) return;
+  if(chat.tgt==null) chat.tgt=P.tgt;
+  chatSay("user",esc(text));
+  $("chatIn").value="";
+  const p=parseMasterChat(text);
+  if(p.cmd==="reset"){
+    chatReset(); chatBusy=true;
+    const thinking=chatSay("bot","reverting to the original AI master…");
+    try{ const rep=await postAdjust(); await applyAdjust(rep);
+      thinking.innerHTML="Back to the original AI master — all my tweaks undone. "+scoreLine(rep); }
+    catch(e){ thinking.className="cbub bot err"; thinking.textContent="Couldn't reach the engine: "+e.message; }
+    chatBusy=false; return;
+  }
+  if(p.cmd==="save"){
+    try{ const ab=await (await fetch(DEEP.url+"/result")).arrayBuffer();
+      const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([ab],{type:"audio/wav"}));
+      a.download=fileName.replace(/\.[^.]+$/,"")+"_MASTER_CLEANED.wav"; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),60000);
+      chatSay("bot","Saved your cleaned master (24-bit WAV) to downloads. Keep giving me notes or start a new track."); }
+    catch(e){ chatSay("bot","Couldn't grab the file — "+esc(e.message)); }
+    return;
+  }
+  // adjust
+  if(p.unknown && !p.applied.length){
+    chatSay("bot","I didn't catch a change in that. Try things like <b>more bass</b>, <b>brighter / more air</b>, <b>less harsh</b>, <b>clear the mud</b>, <b>wider</b>, <b>punchier</b>, <b>louder</b> — or <b>reset</b> / <b>save</b>.");
+    return;
+  }
+  chatBusy=true;
+  const thinking=chatSay("bot","working on it…");
+  try{
+    const rep=await postAdjust();
+    await applyAdjust(rep);
+    let msg="Done — "+p.applied.join(", ")+". "+scoreLine(rep);
+    if(p.unknown) msg+="<br><span class='mini'>(applied what I recognized)</span>";
+    msg+="<br><span class='mini'>PLAY to hear it · say more, or <b>save</b> when it's right · <b>reset</b> to undo all</span>";
+    thinking.innerHTML=msg;
+  }catch(e){
+    thinking.className="cbub bot err";
+    thinking.textContent="That didn't apply: "+e.message+". Is the Deep Engine still running?";
+  }
+  chatBusy=false;
+}
+function scoreLine(rep){
+  const a=rep.after, s=rep.scores;
+  return "<span class='mini'>now "+a.lufs+" LUFS · "+a.true_peak_db+" dBTP · balance "+s.balance+"/100 · overall "+s.overall+"/100</span>";
+}
+async function postAdjust(){
+  const r=await fetch(DEEP.url+"/adjust",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({ops:chatOps(),genre:(masterGenre||"hiphop"),lufs:(chat.tgt??P.tgt),ceiling:P.ceil})});
+  if(r.status===409) throw new Error("run AI ENHANCE first");
+  if(r.status===429) throw new Error("engine busy");
+  if(!r.ok) throw new Error("engine error "+r.status);
+  return r.json();
+}
+async function applyAdjust(rep){
+  const ab=await (await fetch(DEEP.url+"/result")).arrayBuffer();
+  ensureCtx(); const buf=await decodeAudio(ctx,ab);
+  const wasPlaying=playing; stopPlayback();
+  buffer=buf; lastMasterFile=null; offset=0;
+  $("roLufs").textContent=rep.after.lufs+" LUFS";
+  $("roTp").textContent=rep.after.true_peak_db+" dBTP"; colorize($("roTp"),rep.after.true_peak_db,-1,-0.3);
+  if(rep.balance_meter) renderBalanceMeter(rep.balance_meter);
+  updateTimeLabel(0);
+  if(wasPlaying) startPlayback(0);
+}
+let masterGenre="hiphop";
+function showMasterChat(genre){
+  masterGenre=genre||masterGenre; chatReset();
+  $("masterChat").classList.add("on");
+  if(!$("chatLog").childElementCount)
+    chatSay("bot","Master's loaded. Tell me what to fix in plain English — <b>less low end</b>, <b>open up the top</b>, <b>tame the harsh vocals</b>, <b>a bit wider</b>, <b>punchier</b>, <b>louder</b>. Say <b>save</b> to download or <b>reset</b> to undo everything.");
+}
+$("chatSend").addEventListener("click",()=>sendChat($("chatIn").value));
+$("chatIn").addEventListener("keydown",e=>{ if(e.key==="Enter"){e.preventDefault();sendChat($("chatIn").value);} });
+document.querySelectorAll(".cchip").forEach(c=>c.addEventListener("click",()=>sendChat(c.textContent)));
 
 /* idle scope (repainted once webfonts arrive so canvas text uses Plex Mono) */
 if(document.fonts&&document.fonts.ready) document.fonts.ready.then(()=>{ if(!anyPlaying()) idleScope(); });

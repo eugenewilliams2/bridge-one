@@ -112,6 +112,13 @@ def biquad(kind, sr, f0, Q, gain_db=0.0):
         a0 = (A + 1) + (A - 1) * cw + 2 * math.sqrt(A) * alpha
         a1 = -2 * ((A - 1) + (A + 1) * cw)
         a2 = (A + 1) + (A - 1) * cw - 2 * math.sqrt(A) * alpha
+    elif kind == "highshelf":
+        b0 = A * ((A + 1) + (A - 1) * cw + 2 * math.sqrt(A) * alpha)
+        b1 = -2 * A * ((A - 1) + (A + 1) * cw)
+        b2 = A * ((A + 1) + (A - 1) * cw - 2 * math.sqrt(A) * alpha)
+        a0 = (A + 1) - (A - 1) * cw + 2 * math.sqrt(A) * alpha
+        a1 = 2 * ((A - 1) - (A + 1) * cw)
+        a2 = (A + 1) - (A - 1) * cw - 2 * math.sqrt(A) * alpha
     elif kind == "peak":
         b0, b1, b2 = 1 + alpha * A, -2 * cw, 1 - alpha * A
         a0, a1, a2 = 1 + alpha / A, -2 * cw, 1 - alpha / A
@@ -721,6 +728,55 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
     return {"genre": genre, "genre_confidence": genre_conf, "genre_scores": genre_scores,
             "analysis": m, "issues": issues, "actions": actions,
             "after": after, "scores": scores, "balance_meter": meter}
+
+# ---------------------------------------------------------------- chat cleanup
+def _bus_deess(x, sr, amt):
+    """Bus de-esser: pull down 5.5–9.5 kHz only when it spikes, by `amt`·70%."""
+    band = apply_biquad(apply_biquad(x, *biquad("highpass", sr, 5500, 0.707)),
+                        *biquad("lowpass", sr, 9500, 0.707))
+    env = onepole(band.pow(2).mean(0, keepdim=True), sr, 4).sqrt()
+    thr = _band_thr(env, 0.75)
+    if thr < 1e-6:
+        return x
+    red = (1 - (env / thr).clamp(min=1.0).pow(-0.7)).clamp(0, min(0.7, 0.7 * amt))
+    return x - band * onepole(red, sr, 15)
+
+def adjust_master(path_in, path_out, ops, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0):
+    """Apply a list of natural-language-derived cleanup ops to an existing
+    master, then re-normalize + true-peak limit. Ops are always applied to the
+    original AI master (the app sends the full cumulative set each time), so
+    there's no generation loss and 'reset' just clears the list."""
+    x, sr = load_audio(path_in)
+    before_spec = out_spectrum(x, sr)
+    src_crest = crest_db(x)
+    for op in ops:
+        t = op.get("type")
+        g = float(op.get("gain", 0))
+        if t == "lowshelf":
+            x = apply_biquad(x, *biquad("lowshelf", sr, float(op.get("f", 80)), 0.707, g))
+        elif t == "highshelf":
+            x = apply_biquad(x, *biquad("highshelf", sr, float(op.get("f", 10000)), 0.707, g))
+        elif t == "bell":
+            x = apply_biquad(x, *biquad("peak", sr, float(op.get("f", 1000)), float(op.get("q", 1.0)), g))
+        elif t == "deess":
+            x = _bus_deess(x, sr, float(op.get("amt", 0.5)))
+        elif t == "width":
+            mult = float(op.get("mult", 1.0))
+            mid = (x[0] + x[1]) * 0.5
+            side = apply_biquad(((x[0] - x[1]) * 0.5 * mult)[None], *biquad("highpass", sr, 120, 0.707))[0]
+            x = torch.stack([mid + side, mid - side])
+        elif t == "saturate":
+            d = float(op.get("drive", 1.1))
+            x = torch.tanh(x * d) / math.tanh(d)
+    x = stage_loudness(x, sr, target_lufs, ceiling_db, [])
+    tgt = TARGETS.get(genre, TARGETS["hiphop"])
+    save_wav24(x, sr, path_out)
+    return {"after": {"lufs": round(lufs(x, sr), 1),
+                      "true_peak_db": round(true_peak_db(x, sr), 2),
+                      "crest_db": round(crest_db(x), 1),
+                      "correlation": round(correlation(x), 3)},
+            "scores": score_result(x, sr, tgt, {"crest_db": src_crest}, target_lufs),
+            "balance_meter": balance_meter(tgt, before_spec, out_spectrum(x, sr))}
 
 # ---------------------------------------------------------------- AI mix
 # Per-genre stem loudness offsets relative to the lead vocal (LUFS). These are

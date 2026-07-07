@@ -58,7 +58,8 @@ def run_enhance(job_id, src_path, workdir, genre, target_lufs, linphase):
         with LOCK:
             if JOB["id"] == job_id:
                 JOB.update(state="done", pct=100, msg="master ready",
-                           out=out_path, report=report)
+                           out=out_path, report=report,
+                           master_orig=out_path, genre=report.get("genre", "hiphop"))
     except Exception as e:  # noqa: BLE001 — job errors go to the client
         print(f"enhance job failed: {e}", file=sys.stderr)
         with LOCK:
@@ -283,6 +284,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path == "/adjust":
+            self._handle_adjust()
+            return
         if u.path not in ("/split", "/enhance", "/aimix"):
             self._json(404, {"error": "not found"})
             return
@@ -336,6 +340,49 @@ class Handler(BaseHTTPRequestHandler):
         else:
             threading.Thread(target=run_job, args=(job_id, src, workdir), daemon=True).start()
         self._json(200, {"id": job_id})
+
+    def _handle_adjust(self):
+        """Synchronous cleanup: apply chat-derived ops to the current AI master
+        and re-limit. Fast (EQ + limiter, no model) so the chat feels instant."""
+        with LOCK:
+            orig = JOB.get("master_orig")
+            workdir = JOB.get("workdir")
+            genre = JOB.get("genre", "hiphop")
+            busy = JOB["state"] == "running"
+        if busy:
+            self._json(429, {"error": "engine busy — wait for the current job"})
+            return
+        if not orig or not os.path.exists(orig):
+            self._json(409, {"error": "no master to adjust — run AI ENHANCE first"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            req = json.loads(body or b"{}")
+        except Exception:
+            self._json(400, {"error": "bad JSON body"})
+            return
+        ops = req.get("ops") or []
+        if not isinstance(ops, list) or len(ops) > 32:
+            self._json(400, {"error": "ops must be a list (≤32)"})
+            return
+        try:
+            tgt = float(req.get("lufs", -9.5)); tgt = min(-5.0, max(-20.0, tgt))
+            ceil = float(req.get("ceiling", -1.0)); ceil = min(-0.3, max(-2.0, ceil))
+        except (TypeError, ValueError):
+            tgt, ceil = -9.5, -1.0
+        out = os.path.join(workdir or tempfile.gettempdir(), "adjusted.wav")
+        try:
+            import engine
+            report = engine.adjust_master(orig, out, ops, genre=genre,
+                                          target_lufs=tgt, ceiling_db=ceil)
+        except Exception as e:  # noqa: BLE001
+            print(f"adjust failed: {e}", file=sys.stderr)
+            self._json(500, {"error": str(e)[:240]})
+            return
+        with LOCK:
+            JOB["out"] = out           # /result now returns the adjusted master
+        self._json(200, report)
 
 def main():
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)

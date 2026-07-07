@@ -84,6 +84,14 @@ well-balanced material the engine does very little — by design.
 `/aimix` writes the 4 balanced stems (fetch via `/stem?name=`) plus the summed
 mix (`/result`); the report includes per-stem `balance` in dB.
 
+`POST /adjust` (JSON `{ops, genre, lufs, ceiling}`) applies a list of cleanup
+ops (`lowshelf`/`highshelf`/`bell`/`deess`/`width`/`saturate`) to the last AI
+master and re-limits — synchronous, returns fresh `scores`/`after`/
+`balance_meter`. Powers **MASTER CHAT**: the app parses plain-English notes
+("less low end, open up the top, tame the harshness") into ops locally and
+re-applies the full cumulative set to the original master each time (no
+generation loss; `reset` clears it, `save` downloads the result).
+
 ## Tuning
 
 - `BRIDGESPLIT_MODEL=htdemucs_ft` — maximum separation quality, ~4× slower
