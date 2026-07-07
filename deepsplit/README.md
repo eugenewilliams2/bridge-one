@@ -12,7 +12,27 @@ Terminal window open. A status page opens at http://127.0.0.1:8765 with its
 own drag-and-drop UI, and BRIDGE ONE (`index.html`) auto-detects the engine:
 
 - MIX tab grows a **DEEP SPLIT (AI)** button — neural VOCALS/DRUMS/BASS/MUSIC
+- MIX tab grows an **AI MIX (AUTO-BALANCE)** button — full auto-mix
 - MASTER tab grows an **AI ENHANCE (DEEP ENGINE)** button — full auto-master
+
+## What AI MIX actually does
+
+Same discipline as AI ENHANCE, but it works *between* the elements and stops
+at a balanced mix (not a master), leaving headroom for mastering:
+
+1. **Separates** the track into stems (Demucs) and processes each adaptively
+   (vocal HPF + de-ess + presence, drum transients, 808 mono + saturation,
+   music-bed mud clearing)
+2. **Unmasks the vocal** — carves ≤3 pockets in the music where the vocal is
+   strongest so it cuts through without turning it up (A/B gated on a vocal-
+   clarity metric; reverted if it doesn't help)
+3. **Widens** the music bed to open space around the center vocal
+4. **Sets the balance** from genre targets (vocal on top, drums under, bass
+   controlled, music tucked back), clamped to ±12 dB per stem
+5. **Gain-stages** the sum to ~-16 LUFS with ≥1 dB headroom — **no limiting**
+
+Loads the balanced stems back into the mixer (faders at 0 = the AI balance)
+so you can nudge anything, then **BOUNCE → MASTER** or **AI ENHANCE** to finish.
 
 ## What AI ENHANCE actually does
 
@@ -36,7 +56,11 @@ well-balanced material the engine does very little — by design.
 ## Endpoints (for the curious)
 
 `GET /health` · `POST /split` · `POST /enhance?genre=hiphop|rnb|pop&lufs=-9.5`
-· `GET /status?id=` · `GET /stem?id=&name=` · `GET /report` · `GET /result`
+· `POST /aimix?genre=hiphop|rnb|pop&lufs=-16` · `GET /status?id=`
+· `GET /stem?id=&name=` · `GET /report` · `GET /result`
+
+`/aimix` writes the 4 balanced stems (fetch via `/stem?name=`) plus the summed
+mix (`/result`); the report includes per-stem `balance` in dB.
 
 ## Tuning
 

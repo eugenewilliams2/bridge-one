@@ -330,6 +330,14 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
         DEEP SPLIT (AI)</button>
     </div>
+    <div class="stemTools" id="aiMixRow" style="display:none;margin-top:9px">
+      <button id="btnAiMix" style="flex:1;border-color:var(--gold-dim);color:var(--gold-hi)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4v6m0 4v6M12 4v9m0 4v3M19 4v3m0 4v9"/><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="15" r="2" fill="currentColor"/><circle cx="19" cy="9" r="2" fill="currentColor"/></svg>
+        AI MIX (AUTO-BALANCE)</button>
+      <select id="mixGenreSel" aria-label="Mix genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;flex:0 0 auto">
+        <option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+      </select>
+    </div>
     <div id="stemList"></div>
     <div class="mixBar" id="mixBar">
       <button class="play" id="btnMixPlay" aria-label="Play mix">
@@ -1165,9 +1173,11 @@ let splitMode="dsp";
 $("btnAddStems").addEventListener("click",()=>stemPicker.click());
 $("btnSplit").addEventListener("click",()=>{splitMode="dsp";splitPicker.click();});
 $("btnDeepSplit").addEventListener("click",()=>{splitMode="ai";splitPicker.click();});
+$("btnAiMix").addEventListener("click",()=>{splitMode="aimix";splitPicker.click();});
 stemPicker.addEventListener("change",()=>{ if(stemPicker.files.length) addStemFiles([...stemPicker.files]); stemPicker.value=""; });
 splitPicker.addEventListener("change",()=>{
-  if(splitPicker.files[0]) (splitMode==="ai"?deepSplitTrack:splitTrack)(splitPicker.files[0]);
+  const f=splitPicker.files[0];
+  if(f){ (splitMode==="aimix"?aiMixTrack:splitMode==="ai"?deepSplitTrack:splitTrack)(f); }
   splitPicker.value="";
 });
 
@@ -1180,6 +1190,7 @@ async function deepCheck(){
     const j=await r.json(); DEEP.ok=!!j.ok; DEEP.model=j.model||"";
   }catch(e){ DEEP.ok=false; }
   $("btnDeepSplit").style.display=DEEP.ok?"":"none";
+  $("aiMixRow").style.display=DEEP.ok?"flex":"none";
   $("enhanceRow").style.display=DEEP.ok&&$("exportRow").classList.contains("on")?"flex":"none";
   $("splitLbl").textContent=DEEP.ok?"QUICK SPLIT (DSP)":"SPLIT FULL TRACK";
   $("deepNote").innerHTML=DEEP.ok
@@ -1222,6 +1233,55 @@ async function deepSplitTrack(f){
   }catch(err){
     progHide();
     status("Deep split failed: "+esc(err.message)+".<br>Is the engine running? Double-click <b>Deep Split.command</b> in your bridge-one folder, keep its window open, then try again.");
+  }
+}
+
+/* AI MIX: engine splits + balances the whole track, loads the balanced stems
+   into the mixer (faders at 0 = the AI balance) so you can tweak + BOUNCE. */
+async function aiMixTrack(f){
+  logReset();
+  progShow("SENDING TO AI ENGINE",true);
+  const genre=$("mixGenreSel").value;
+  logLine("AI mix <b>"+esc(f.name)+"</b> · "+genre+" · demucs/"+esc(DEEP.model)+" · 100% on this machine");
+  try{
+    const r=await fetch(DEEP.url+"/aimix?genre="+encodeURIComponent(genre),
+      {method:"POST",headers:{"X-Filename":f.name},body:f});
+    if(r.status===429) throw new Error("engine is busy with another song");
+    if(!r.ok) throw new Error("engine error "+r.status);
+    const {id}=await r.json();
+    const t0=performance.now();
+    await new Promise((res,rej)=>{
+      const iv=setInterval(async()=>{
+        try{
+          const s=await (await fetch(DEEP.url+"/status?id="+id)).json();
+          if(s.id!==id) return;
+          progSet(Math.max(0.02,s.pct/100),"AI MIX · "+String(s.msg||"working").toUpperCase());
+          if(s.state==="done"){clearInterval(iv);res();}
+          else if(s.state==="error"){clearInterval(iv);rej(new Error(s.msg||"engine error"));}
+        }catch(e){clearInterval(iv);rej(new Error("lost contact with the engine"));}
+      },1500);
+    });
+    const rep=await (await fetch(DEEP.url+"/report")).json();
+    ensureCtx();
+    /* clear any existing stems so the balanced set is the whole session */
+    MIX.stems.length=0;
+    const base=f.name.replace(/\.[^.]+$/,"").toUpperCase().slice(0,10);
+    const names={vocals:"VOCALS",drums:"DRUMS",bass:"BASS",other:"MUSIC"};
+    for(const k of ["vocals","drums","bass","other"]){
+      progShow("FETCHING "+names[k]+" STEM",true);
+      const ab=await (await fetch(DEEP.url+"/stem?id="+id+"&name="+k)).arrayBuffer();
+      /* levels are baked into the stems → fader sits at 0 */
+      addStem(names[k]+" · "+base, await decodeAudio(ctx,ab), {gain:0});
+    }
+    progSet(1,"DONE"); setTimeout(progHide,800);
+    (rep.issues||[]).forEach(i=>logLine("found: "+esc(i)));
+    (rep.actions||[]).forEach(a=>logLine(esc(a)));
+    logLine("<b>AI mix ready</b> in "+((performance.now()-t0)/1000).toFixed(0)+"s · "+
+      rep.after.lufs+" LUFS · peak "+rep.after.peak_db+" dBFS (headroom left for mastering)");
+    logLine("PLAY MIX to hear it · nudge any fader to taste · <b>BOUNCE → MASTER</b> when it's right");
+  }catch(err){
+    progHide();
+    status("AI mix failed: "+esc(err.message)+".<br>Is the engine running? Double-click <b>Deep Split.command</b> in your bridge-one folder, keep its window open, then try again.");
   }
 }
 

@@ -65,6 +65,30 @@ def run_enhance(job_id, src_path, workdir, genre, target_lufs):
             if JOB["id"] == job_id:
                 JOB.update(state="error", err=str(e)[:240], msg=str(e)[:240])
 
+def run_aimix(job_id, src_path, workdir, genre, mix_lufs):
+    stem_dir = os.path.join(workdir, "aimix")
+    mix_path = os.path.join(workdir, "mix.wav")
+    with LOCK:
+        JOB.update(state="running", pct=1, msg="starting engine")
+    try:
+        import engine  # heavy import (torch) — deferred to the worker thread
+        def prog(pct, msg):
+            with LOCK:
+                if JOB["id"] == job_id:
+                    JOB.update(pct=int(pct), msg=msg)
+        report = engine.aimix(src_path, stem_dir, mix_path, genre=genre,
+                              mix_target_lufs=mix_lufs, device=DEVICE,
+                              model=MODEL, progress=prog)
+        with LOCK:
+            if JOB["id"] == job_id:
+                JOB.update(state="done", pct=100, msg="mix ready",
+                           dir=stem_dir, out=mix_path, report=report)
+    except Exception as e:  # noqa: BLE001 — job errors go to the client
+        print(f"aimix job failed: {e}", file=sys.stderr)
+        with LOCK:
+            if JOB["id"] == job_id:
+                JOB.update(state="error", err=str(e)[:240], msg=str(e)[:240])
+
 def run_job(job_id, src_path, workdir):
     out = os.path.join(workdir, "out")
     cmd = [sys.executable, "-m", "demucs", "-n", MODEL, "-d", DEVICE,
@@ -259,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
-        if u.path not in ("/split", "/enhance"):
+        if u.path not in ("/split", "/enhance", "/aimix"):
             self._json(404, {"error": "not found"})
             return
         with LOCK:
@@ -290,9 +314,9 @@ class Handler(BaseHTTPRequestHandler):
             JOB.update(id=job_id, state="queued", pct=0, msg="queued", dir=None,
                        err="", workdir=workdir, out=None, report=None,
                        type=u.path.lstrip("/"))
+        q = parse_qs(u.query)
+        genre = (q.get("genre") or ["hiphop"])[0]
         if u.path == "/enhance":
-            q = parse_qs(u.query)
-            genre = (q.get("genre") or ["hiphop"])[0]
             try:
                 tgt = float((q.get("lufs") or ["-9.5"])[0])
             except ValueError:
@@ -300,6 +324,14 @@ class Handler(BaseHTTPRequestHandler):
             tgt = min(-5.0, max(-20.0, tgt))
             threading.Thread(target=run_enhance,
                              args=(job_id, src, workdir, genre, tgt), daemon=True).start()
+        elif u.path == "/aimix":
+            try:
+                mix_lufs = float((q.get("lufs") or ["-16"])[0])
+            except ValueError:
+                mix_lufs = -16.0
+            mix_lufs = min(-10.0, max(-24.0, mix_lufs))
+            threading.Thread(target=run_aimix,
+                             args=(job_id, src, workdir, genre, mix_lufs), daemon=True).start()
         else:
             threading.Thread(target=run_job, args=(job_id, src, workdir), daemon=True).start()
         self._json(200, {"id": job_id})

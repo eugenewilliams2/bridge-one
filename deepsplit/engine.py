@@ -474,3 +474,132 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
     prog(100, "done")
     return {"genre": genre, "analysis": m, "issues": issues,
             "actions": actions, "after": after}
+
+# ---------------------------------------------------------------- AI mix
+# Per-genre stem loudness offsets relative to the lead vocal (LUFS). These are
+# where a mix engineer sits each element: vocal on top, drums just under, bass
+# controlled, music bed tucked back so the vocal owns the center.
+MIX_BALANCE = {
+    "hiphop": {"vocals": 0.0, "drums": -1.5, "bass": -2.5, "other": -5.5},
+    "rnb":    {"vocals": 0.0, "drums": -3.0, "bass": -3.0, "other": -4.5},
+    "pop":    {"vocals": 0.0, "drums": -2.5, "bass": -3.5, "other": -4.0},
+}
+
+def widen(x, amt):
+    mid = (x[0] + x[1]) * 0.5
+    side = (x[0] - x[1]) * 0.5 * amt
+    return torch.stack([mid + side, mid - side])
+
+def vocal_presence(mix, sr):
+    """Energy in the 1–4 kHz vocal-presence band (dB, mid-anchored) — clarity proxy."""
+    _, spec = band_spectrum(mix, sr)
+    return region_db(normalize_curve(spec), 1000, 4000)
+
+def mask_carve(music, vocal, sr, actions):
+    """Cut the music stem in the ≤3 bands where the vocal is strongest, so the
+    vocal cuts through without turning it up (frequency-masking reduction)."""
+    _, vspec = band_spectrum(vocal, sr)
+    vn = normalize_curve(vspec)
+    cand = sorted(((float(vn[i]), float(BAND_HZ[i])) for i in range(len(BAND_HZ))
+                   if 350 <= BAND_HZ[i] <= 5000 and vn[i] > 1.0), reverse=True)
+    used, n = [], 0
+    for exc, f in cand:
+        if all(abs(math.log2(f / u)) > 0.5 for u in used):
+            cut = min(3.0, 0.55 * exc)
+            music = apply_biquad(music, *biquad("peak", sr, f, 2.5, -cut))
+            used.append(f); n += 1
+        if n >= 3:
+            break
+    if n:
+        actions.append(f"music: carved {n} pocket(s) so the vocal cuts through (mask reduction, ≤3 dB)")
+    return music, n
+
+def aimix(path_in, stem_dir, mix_path, genre="hiphop", mix_target_lufs=-16.0,
+          model="htdemucs", device="cpu", progress=None):
+    """AI mix: separate → adaptively process each stem → unmask the vocal →
+    set the balance from genre targets → sum to a headroom-safe mix (no
+    limiting; mastering happens after). Saves the 4 processed stems (levels
+    baked in) plus the summed mix, and reports every move with its reason."""
+    def prog(p, msg):
+        if progress: progress(p, msg)
+
+    prog(2, "loading audio")
+    x, sr = load_audio(path_in)
+    target = TARGETS.get(genre, TARGETS["hiphop"])
+
+    prog(6, "analyzing source")
+    m, norm = analyze(x, sr)
+    issues = detect_issues(m, norm, target)
+    actions = ["ML source separation → per-stem processing → intelligent balance"]
+    if abs(m["dc_offset"]) > 0.002:
+        x = x - x.mean(dim=1, keepdim=True)
+        actions.append("removed DC offset")
+    x = apply_biquad(x, *biquad("highpass", sr, 20, 0.707))
+
+    prog(12, "separating stems (demucs — the long part, hang tight)")
+    stems, ssr = separate(x, sr, model, device, None)
+    stems = {k: v.float() for k, v in stems.items()}
+    sr = ssr
+
+    prog(50, "processing stems adaptively")
+    stems = process_stems(stems, sr, m, norm, target, actions)
+
+    prog(64, "unmasking the vocal (A/B gated)")
+    before = vocal_presence(stems["vocals"] + stems["other"], sr)
+    carved, ncuts = mask_carve(stems["other"].clone(), stems["vocals"], sr, actions)
+    if ncuts:
+        if vocal_presence(stems["vocals"] + carved, sr) >= before - 0.05:
+            stems["other"] = carved
+        else:
+            actions[-1] += " — reverted (didn't help clarity)"
+
+    prog(72, "widening the music bed")
+    stems["other"] = widen(stems["other"], 1.18)
+    actions.append("music: +18% stereo width to open space around the center vocal")
+
+    prog(78, "setting the balance")
+    bal = MIX_BALANCE.get(genre, MIX_BALANCE["hiphop"])
+    lu = {k: lufs(stems[k], sr) for k in stems}
+    vref = lu["vocals"] if lu["vocals"] > -55 else max(lu.values())
+    gains = {k: max(-12.0, min(12.0, (vref + bal[k]) - lu[k]))
+             for k in ("vocals", "drums", "bass", "other")}
+
+    # gain-stage the summed balance to the mix target, then guarantee headroom
+    mix_raw = sum(stems[k] * 10 ** (gains[k] / 20) for k in stems)
+    glob = mix_target_lufs - lufs(mix_raw, sr)
+    peak = float((mix_raw * 10 ** (glob / 20)).abs().max())
+    if peak > 0:
+        glob += min(0.0, -20 * math.log10(peak) - 1.0)   # keep ≥1 dB headroom
+    rec = {k: round(gains[k] + glob, 1) for k in gains}
+
+    # bake the balance into the stems (faders sit at 0), sum the mix
+    for k in stems:
+        stems[k] = stems[k] * 10 ** (rec[k] / 20)
+    mix = sum(stems.values())
+    peak = max([float(mix.abs().max())] + [float(stems[k].abs().max()) for k in stems])
+    if peak > 0.999:                                       # global clip safety
+        s = 0.999 / peak
+        for k in stems:
+            stems[k] = stems[k] * s
+        mix = mix * s
+    actions.append("balance: " + " · ".join(f"{k} {rec[k]:+.1f} dB" for k in
+                   ("vocals", "drums", "bass", "other")))
+    actions.append(f"mix bus: gain-staged to ~{mix_target_lufs} LUFS with ≥1 dB "
+                   "headroom — no limiting (mix stage, mastering comes after)")
+
+    prog(90, "encoding stems + mix")
+    os.makedirs(stem_dir, exist_ok=True)
+    for k in ("vocals", "drums", "bass", "other"):
+        save_wav24(stems[k], sr, os.path.join(stem_dir, k + ".wav"))
+    save_wav24(mix, sr, mix_path)
+
+    prog(96, "verifying")
+    after = {
+        "lufs": round(lufs(mix, sr), 1),
+        "peak_db": round(20 * math.log10(float(mix.abs().max()) + 1e-12), 2),
+        "crest_db": round(crest_db(mix), 1),
+        "correlation": round(correlation(mix), 3),
+    }
+    prog(100, "done")
+    return {"genre": genre, "analysis": m, "issues": issues, "actions": actions,
+            "balance": rec, "after": after}
