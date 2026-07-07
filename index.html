@@ -482,6 +482,7 @@
         <button class="cchip">less low end</button><button class="cchip">open up the top</button>
         <button class="cchip">tame the harshness</button><button class="cchip">a bit wider</button>
         <button class="cchip">less reverb</button><button class="cchip">more space</button>
+        <button class="cchip">add tape warmth</button><button class="cchip">vintage compression</button>
         <button class="cchip">clean up the mud</button><button class="cchip">reset</button><button class="cchip">save</button>
       </div>
       <div class="chatInputRow">
@@ -1970,8 +1971,8 @@ function renderBalanceMeter(d){
    ============================================================ */
 /* cumulative, structured so successive notes compound cleanly and reset works.
    All ops are re-applied to the ORIGINAL AI master each send (no gen loss). */
-let chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tgt:null, notes:0};
-function chatReset(){ chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tgt:P.tgt, notes:0}; }
+let chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tape:0, vcomp:0, veq:0, tgt:null, notes:0};
+function chatReset(){ chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tape:0, vcomp:0, veq:0, tgt:P.tgt, notes:0}; }
 function chatOps(){
   const ops=[];
   for(const k in chat.eq){
@@ -1984,6 +1985,9 @@ function chatOps(){
   if(chat.deess>0.05) ops.push({type:"deess",amt:+chat.deess.toFixed(2)});
   if(chat.dereverb>0.05) ops.push({type:"dereverb",amt:+Math.min(1,chat.dereverb).toFixed(2)});
   if(chat.reverb>0.05) ops.push({type:"reverb",amt:+Math.min(1,chat.reverb).toFixed(2),size:1.0});
+  if(chat.veq>0.05) ops.push({type:"vintageeq",amt:+Math.min(1,chat.veq).toFixed(2)});
+  if(chat.vcomp>0.05) ops.push({type:"vintagecomp",amt:+Math.min(1,chat.vcomp).toFixed(2)});
+  if(chat.tape>0.05) ops.push({type:"tape",amt:+Math.min(1,chat.tape).toFixed(2)});
   if(chat.drive>1.02) ops.push({type:"saturate",drive:+chat.drive.toFixed(2)});
   return ops;
 }
@@ -2030,6 +2034,10 @@ function processClause(t,mag,dir,applied){
     [/\b(reverb|verb|wetness|wet |wash|ambien|echo|roomy|reverby|washed|soaked|drench)/, ()=>{const d=dir(0); if(d<0){chat.dereverb=Math.min(1,Math.max(chat.dereverb,0.55*mag));applied.push("reduced the reverb / dried it up")} else {chat.reverb=Math.min(1,Math.max(chat.reverb,0.55*mag));applied.push("added reverb / space")} }],
     [/\b(drier|dryer|dry it|more dry|less room|less space|tighten the (reverb|verb|room)|too wet|too much (reverb|verb|room|space|echo))/, ()=>{chat.dereverb=Math.min(1,Math.max(chat.dereverb,0.55*mag));applied.push("reduced the reverb / dried it up")}],
     [/\b(more room|more space|bigger space|roomier|more depth|more ambien|deeper|more air around)/, ()=>{chat.reverb=Math.min(1,Math.max(chat.reverb,0.55*mag));applied.push("added room / space")}],
+    // vintage / analog character
+    [/\b(tape|analog|vintage|vinyl|saturat|old school|colou?r|character|analogue)/, ()=>{ if(/\b(comp|glue|pultec|eq)/.test(t)) return; const d=dir(1); chat.tape=Math.min(1,Math.max(0,chat.tape+(d>0?0.5*mag:-0.5*mag))); applied.push(d>0?"added analog tape warmth":"backed off the tape colour")}],
+    [/\b(vari.?mu|opto|la.?2a|fairchild|analog glue|tube comp|glue comp|vintage comp|vintage compress)/, ()=>{chat.vcomp=Math.min(1,Math.max(chat.vcomp,0.5*mag));applied.push("added vintage compression (opto glue)")}],
+    [/\b(pultec|vintage eq|analog eq|program eq)/, ()=>{chat.veq=Math.min(1,Math.max(chat.veq,0.5*mag));applied.push("added Pultec-style vintage EQ (tight lows + air)")}],
     // stereo
     [/\b(wide|wider|width|spacious|big stereo|open stereo|stereo|huge|expand)/, ()=>{const d=dir(1);chat.width=Math.max(0.5,Math.min(1.6,chat.width*(1+0.14*mag*d)));applied.push((d>0?"widened the stereo image":"narrowed the stereo image"))}],
     [/\b(narrow|narrower|mono|centered|center|tighten stereo|less wide|focus|collapse)/, ()=>{chat.width=Math.max(0.5,Math.min(1.6,chat.width*(1-0.14*mag)));applied.push("narrowed the image / more mono")}],
@@ -2077,7 +2085,7 @@ async function sendChat(text){
   }
   // adjust
   if(p.unknown && !p.applied.length){
-    chatSay("bot","I didn't catch a change in that. Try things like <b>more bass</b>, <b>brighter / more air</b>, <b>less harsh</b>, <b>clear the mud</b>, <b>wider</b>, <b>less reverb / drier</b>, <b>more space</b>, <b>punchier</b>, <b>louder</b> — or <b>reset</b> / <b>save</b>.");
+    chatSay("bot","I didn't catch a change in that. Try things like <b>more bass</b>, <b>brighter / more air</b>, <b>less harsh</b>, <b>clear the mud</b>, <b>wider</b>, <b>less reverb / drier</b>, <b>more space</b>, <b>tape warmth</b>, <b>vintage compression</b>, <b>Pultec EQ</b>, <b>punchier</b>, <b>louder</b> — or <b>reset</b> / <b>save</b>.");
     return;
   }
   chatBusy=true;

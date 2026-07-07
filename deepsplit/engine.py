@@ -803,6 +803,41 @@ def stage_dereverb(x, sr, amt, n_fft=2048, hop=512):
                                 center=True, length=x.shape[1]))
     return torch.stack(outs)
 
+def stage_tape(x, sr, amt):
+    """Analog tape emulation: low head-bump, asymmetric soft saturation
+    (even + odd harmonics = warmth), gentle high-frequency rolloff."""
+    y = apply_biquad(x, *biquad("lowshelf", sr, 60, 0.8, 1.2 * amt))   # head bump
+    drive = 1.0 + 1.6 * amt
+    bias = 0.14 * amt                                                  # asymmetry → even harmonics
+    y = (torch.tanh(drive * y + bias) - math.tanh(bias)) / math.tanh(drive)
+    y = y - y.mean(dim=1, keepdim=True)                               # kill residual DC
+    y = apply_biquad(y, *biquad("highshelf", sr, 12000, 0.707, -1.1 * amt))  # HF rolloff
+    return y
+
+def stage_vintagecomp(x, sr, amt):
+    """Opto / vari-mu style bus compressor: slow, program-dependent, soft, with
+    a touch of tube harmonic color. Smooth 'glue' rather than fast control."""
+    env = onepole(x.pow(2).mean(0, keepdim=True), sr, 30).sqrt()
+    thr = _band_thr(env, 0.6)
+    if thr < 1e-6:
+        return x
+    ratio = 2.5
+    over_db = 20 * torch.log10((env / thr).clamp(min=1.0))
+    gr = 10 ** (-(over_db * (1 - 1 / ratio)).clamp(max=6.0 * amt) / 20)
+    gr = onepole(gr, sr, 130)                                         # slow opto release
+    y = x * gr
+    d = 1.0 + 0.3 * amt                                              # subtle tube color
+    y = torch.tanh(d * y) / math.tanh(d)
+    return y * 10 ** ((3.0 * amt) / 20)                              # gentle makeup
+
+def stage_vintageeq(x, sr, amt):
+    """Pultec-style program EQ: the classic low boost + slightly-higher cut
+    (tight, resonant lows) plus a broad, silky top-end air shelf."""
+    y = apply_biquad(x, *biquad("lowshelf", sr, 60, 0.9, 2.0 * amt))   # low boost
+    y = apply_biquad(y, *biquad("peak", sr, 200, 1.0, -1.2 * amt))     # low-mid cut (the trick)
+    y = apply_biquad(y, *biquad("highshelf", sr, 12000, 0.6, 1.8 * amt))  # air
+    return y
+
 def adjust_master(path_in, path_out, ops, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0):
     """Apply a list of natural-language-derived cleanup ops to an existing
     master, then re-normalize + true-peak limit. Ops are always applied to the
@@ -834,6 +869,12 @@ def adjust_master(path_in, path_out, ops, genre="hiphop", target_lufs=-9.5, ceil
             x = stage_dereverb(x, sr, float(op.get("amt", 0.5)))
         elif t == "reverb":
             x = stage_reverb(x, sr, float(op.get("amt", 0.4)), float(op.get("size", 1.0)))
+        elif t == "tape":
+            x = stage_tape(x, sr, float(op.get("amt", 0.5)))
+        elif t == "vintagecomp":
+            x = stage_vintagecomp(x, sr, float(op.get("amt", 0.5)))
+        elif t == "vintageeq":
+            x = stage_vintageeq(x, sr, float(op.get("amt", 0.5)))
     x = stage_loudness(x, sr, target_lufs, ceiling_db, [])
     tgt = TARGETS.get(genre, TARGETS["hiphop"])
     save_wav24(x, sr, path_out)
