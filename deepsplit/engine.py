@@ -548,6 +548,32 @@ def stage_dynamic_eq(x, sr, actions):
         actions.append(f"dynamic EQ: {f:.0f} Hz tamed only when it spikes (≤6 dB, dynamic)")
     return x
 
+def stage_stabilizer(x, sr, actions, amount=0.55, n_fft=2048, hop=512, keep=32):
+    """Ozone Stabilizer (Tame): broadband adaptive resonance smoothing. For
+    every STFT frame it builds a smooth spectral envelope (low-quefrency
+    cepstral lift) and pulls down any bin poking above it, bounded to
+    ≤ ~4·amount dB. This flattens harsh peaks and ringing across the whole
+    spectrum, frame by frame, without touching parts that are already smooth."""
+    win = torch.hann_window(n_fft)
+    floor = 10 ** (-(4.0 * amount) / 20)   # deepest attenuation per bin
+    outs, touched = [], 0.0
+    for ch in range(x.shape[0]):
+        st = torch.stft(x[ch], n_fft=n_fft, hop_length=hop, window=win,
+                        return_complex=True, center=True)
+        mag = st.abs()
+        cep = torch.fft.rfft(torch.log(mag + 1e-9), dim=0)   # cepstrum along freq
+        cep[keep:, :] = 0                                     # keep smooth envelope
+        env = torch.exp(torch.fft.irfft(cep, n=mag.shape[0], dim=0))
+        g = torch.where(mag > env, (env / (mag + 1e-9)).pow(amount).clamp(min=floor),
+                        torch.ones_like(mag))
+        touched += float((g < 0.95).float().mean())
+        outs.append(torch.istft(st * g, n_fft=n_fft, hop_length=hop, window=win,
+                                center=True, length=x.shape[1]))
+    if touched / x.shape[0] > 0.01:
+        actions.append(f"stabilizer: adaptive spectral smoothing — resonances & harshness "
+                       f"tamed across the spectrum (≤{4.0 * amount:.0f} dB/peak)")
+    return torch.stack(outs)
+
 def stage_multiband_image(x, sr, m, actions, linphase=False):
     """Ozone Imager: width per band — lows mono, mids natural, highs opened.
     Narrower sources get pushed wider; already-wide ones are left alone."""
@@ -623,8 +649,21 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
             actions.insert(0, "ML source separation → per-stem processing → remix")
         except Exception as e:  # noqa: BLE001 — stems are an upgrade, not a requirement
             actions.append(f"stem stage skipped ({e}) — bus-only processing")
-    prog(56, "dynamic EQ (resonance control)")
+    prog(54, "dynamic EQ (resonance control)")
     x = stage_dynamic_eq(x, sr, actions)
+
+    # Stabilizer (Ozone) — strength adapts to how harsh/resonant the source is;
+    # A/B gated so it only stays if it doesn't dull the track.
+    harsh = region_db(norm - target, 2500, 6000)
+    amount = 0.5 + min(0.35, max(0.0, harsh - 1.0) * 0.15)
+    prog(58, "stabilizer (adaptive resonance smoothing, A/B gated)")
+    st_before = quality_score(excerpt(x, sr), sr, target)
+    y = stage_stabilizer(x, sr, actions, amount=amount)
+    if quality_score(excerpt(y, sr), sr, target) <= st_before + 0.05:
+        x = y
+    elif actions and actions[-1].startswith("stabilizer"):
+        actions[-1] += " — reverted (dulled the track)"
+    del y
 
     prog(62, "tonal balance (matching EQ, A/B gated)")
     ex_before = quality_score(excerpt(x, sr), sr, target)

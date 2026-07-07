@@ -45,6 +45,10 @@ so you can nudge anything, then **BOUNCE → MASTER** or **AI ENHANCE** to finis
    saturation, mud clearing in the music bed
 4. **Adaptive bus chain (Ozone-parity modules, all measured + A/B gated):**
    - **Dynamic EQ** — tames each resonant band only when it spikes (≤6 dB)
+   - **Stabilizer** — broadband adaptive resonance smoothing: per STFT frame it
+     builds a smooth cepstral spectral envelope and pulls down any peak poking
+     above it (≤~4 dB, strength adapts to source harshness). A/B gated so it
+     never dulls the track
    - **Matching EQ** — linear-phase move toward the genre curve (±4 dB cap,
      reverted if it doesn't measurably improve the spectrum)
    - **Multiband compressor** — 4-band (low/low-mid/mid/high), gentle ratios,
