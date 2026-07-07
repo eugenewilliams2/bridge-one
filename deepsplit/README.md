@@ -85,8 +85,8 @@ well-balanced material the engine does very little — by design.
 mix (`/result`); the report includes per-stem `balance` in dB.
 
 `POST /adjust` (JSON `{ops, genre, lufs, ceiling}`) applies a list of cleanup
-ops (`lowshelf`/`highshelf`/`bell`/`deess`/`width`/`saturate`) to the last AI
-master and re-limits — synchronous, returns fresh `scores`/`after`/
+ops (`lowshelf`/`highshelf`/`bell`/`deess`/`width`/`saturate`/`dereverb`/
+`reverb`) to the last AI master and re-limits — synchronous, returns fresh `scores`/`after`/
 `balance_meter`. Powers **MASTER CHAT**: the app parses plain-English notes
 ("less low end, open up the top, tame the harshness") into ops locally and
 re-applies the full cumulative set to the original master each time (no

@@ -480,6 +480,7 @@
       <div class="chatChips" id="chatChips">
         <button class="cchip">less low end</button><button class="cchip">open up the top</button>
         <button class="cchip">tame the harshness</button><button class="cchip">a bit wider</button>
+        <button class="cchip">less reverb</button><button class="cchip">more space</button>
         <button class="cchip">clean up the mud</button><button class="cchip">reset</button><button class="cchip">save</button>
       </div>
       <div class="chatInputRow">
@@ -1936,8 +1937,8 @@ function renderBalanceMeter(d){
    ============================================================ */
 /* cumulative, structured so successive notes compound cleanly and reset works.
    All ops are re-applied to the ORIGINAL AI master each send (no gen loss). */
-let chat={eq:{}, width:1.0, deess:0, drive:1.0, tgt:null, notes:0};
-function chatReset(){ chat={eq:{}, width:1.0, deess:0, drive:1.0, tgt:P.tgt, notes:0}; }
+let chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tgt:null, notes:0};
+function chatReset(){ chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tgt:P.tgt, notes:0}; }
 function chatOps(){
   const ops=[];
   for(const k in chat.eq){
@@ -1948,6 +1949,8 @@ function chatOps(){
   }
   if(Math.abs(chat.width-1)>0.02) ops.push({type:"width",mult:+chat.width.toFixed(2)});
   if(chat.deess>0.05) ops.push({type:"deess",amt:+chat.deess.toFixed(2)});
+  if(chat.dereverb>0.05) ops.push({type:"dereverb",amt:+Math.min(1,chat.dereverb).toFixed(2)});
+  if(chat.reverb>0.05) ops.push({type:"reverb",amt:+Math.min(1,chat.reverb).toFixed(2),size:1.0});
   if(chat.drive>1.02) ops.push({type:"saturate",drive:+chat.drive.toFixed(2)});
   return ops;
 }
@@ -1990,6 +1993,10 @@ function processClause(t,mag,dir,applied){
     [/\b(bright|brighter|air|airy|open|openness|crisp|sparkle|shine|shimmer|top end|highs|treble|sizzle)/, ()=>{const d=dir(1);eqAdd("highshelf",10000,0,2.2*mag*d);applied.push((d>0?"opened up the top / added air":"took some air off the top"))}],
     [/\b(dull|dark|darker|muffled|veiled|no air|closed|lifeless|dead top)/, ()=>{eqAdd("highshelf",10000,0,2.2*mag);applied.push("brightened the dull top end")}],
     [/\b(sibilan|essy|de-?ess|harsh s|spitty|too much s|ess |sss)/, ()=>{chat.deess=Math.max(chat.deess,0.6*mag);applied.push("de-essed the sibilance")}],
+    // reverb / space — direction-aware; "less/drier" removes, "more/wetter" adds
+    [/\b(reverb|verb|wetness|wet |wash|ambien|echo|roomy|reverby|washed|soaked|drench)/, ()=>{const d=dir(0); if(d<0){chat.dereverb=Math.min(1,Math.max(chat.dereverb,0.55*mag));applied.push("reduced the reverb / dried it up")} else {chat.reverb=Math.min(1,Math.max(chat.reverb,0.55*mag));applied.push("added reverb / space")} }],
+    [/\b(drier|dryer|dry it|more dry|less room|less space|tighten the (reverb|verb|room)|too wet|too much (reverb|verb|room|space|echo))/, ()=>{chat.dereverb=Math.min(1,Math.max(chat.dereverb,0.55*mag));applied.push("reduced the reverb / dried it up")}],
+    [/\b(more room|more space|bigger space|roomier|more depth|more ambien|deeper|more air around)/, ()=>{chat.reverb=Math.min(1,Math.max(chat.reverb,0.55*mag));applied.push("added room / space")}],
     // stereo
     [/\b(wide|wider|width|spacious|big stereo|open stereo|stereo|huge|expand)/, ()=>{const d=dir(1);chat.width=Math.max(0.5,Math.min(1.6,chat.width*(1+0.14*mag*d)));applied.push((d>0?"widened the stereo image":"narrowed the stereo image"))}],
     [/\b(narrow|narrower|mono|centered|center|tighten stereo|less wide|focus|collapse)/, ()=>{chat.width=Math.max(0.5,Math.min(1.6,chat.width*(1-0.14*mag)));applied.push("narrowed the image / more mono")}],
@@ -2037,7 +2044,7 @@ async function sendChat(text){
   }
   // adjust
   if(p.unknown && !p.applied.length){
-    chatSay("bot","I didn't catch a change in that. Try things like <b>more bass</b>, <b>brighter / more air</b>, <b>less harsh</b>, <b>clear the mud</b>, <b>wider</b>, <b>punchier</b>, <b>louder</b> — or <b>reset</b> / <b>save</b>.");
+    chatSay("bot","I didn't catch a change in that. Try things like <b>more bass</b>, <b>brighter / more air</b>, <b>less harsh</b>, <b>clear the mud</b>, <b>wider</b>, <b>less reverb / drier</b>, <b>more space</b>, <b>punchier</b>, <b>louder</b> — or <b>reset</b> / <b>save</b>.");
     return;
   }
   chatBusy=true;
@@ -2045,7 +2052,7 @@ async function sendChat(text){
   try{
     const rep=await postAdjust();
     await applyAdjust(rep);
-    let msg="Done — "+p.applied.join(", ")+". "+scoreLine(rep);
+    let msg="Done — "+[...new Set(p.applied)].join(", ")+". "+scoreLine(rep);
     if(p.unknown) msg+="<br><span class='mini'>(applied what I recognized)</span>";
     msg+="<br><span class='mini'>PLAY to hear it · say more, or <b>save</b> when it's right · <b>reset</b> to undo all</span>";
     thinking.innerHTML=msg;
@@ -2083,7 +2090,7 @@ function showMasterChat(genre){
   masterGenre=genre||masterGenre; chatReset();
   $("masterChat").classList.add("on");
   if(!$("chatLog").childElementCount)
-    chatSay("bot","Master's loaded. Tell me what to fix in plain English — <b>less low end</b>, <b>open up the top</b>, <b>tame the harsh vocals</b>, <b>a bit wider</b>, <b>punchier</b>, <b>louder</b>. Say <b>save</b> to download or <b>reset</b> to undo everything.");
+    chatSay("bot","Master's loaded. Tell me what to fix in plain English — <b>less low end</b>, <b>open up the top</b>, <b>tame the harsh vocals</b>, <b>a bit wider</b>, <b>less reverb</b>, <b>more space</b>, <b>punchier</b>, <b>louder</b>. Say <b>save</b> to download or <b>reset</b> to undo everything.");
 }
 $("chatSend").addEventListener("click",()=>sendChat($("chatIn").value));
 $("chatIn").addEventListener("keydown",e=>{ if(e.key==="Enter"){e.preventDefault();sendChat($("chatIn").value);} });

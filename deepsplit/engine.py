@@ -741,6 +741,68 @@ def _bus_deess(x, sr, amt):
     red = (1 - (env / thr).clamp(min=1.0).pow(-0.7)).clamp(0, min(0.7, 0.7 * amt))
     return x - band * onepole(red, sr, 15)
 
+def convolve_causal(x, ir):
+    """Full causal convolution, truncated to input length (ir[0] aligns x[0])."""
+    n = x.shape[1] + ir.shape[-1] - 1
+    nfft = 1 << ((n - 1).bit_length())
+    y = torch.fft.irfft(torch.fft.rfft(x, nfft) * torch.fft.rfft(ir, nfft), nfft)
+    return y[:, :x.shape[1]]
+
+def _reverb_ir(sr, decay_s, predelay_ms, seed):
+    """Synthetic room impulse: exponentially-decaying noise tail + a few early
+    reflections + predelay. One per channel (different seeds) for stereo width."""
+    g = torch.Generator().manual_seed(seed)
+    n = int(decay_s * sr)
+    t = torch.arange(n) / sr
+    tau = decay_s / 6.908                       # RT60 → exp time constant
+    ir = torch.randn(n, generator=g) * torch.exp(-t / tau)
+    for d_ms, gn in [(7, 0.5), (13, 0.42), (19, 0.34), (29, 0.28), (41, 0.22)]:
+        i = int(d_ms / 1000 * sr)
+        if i < n:
+            ir[i] += gn
+    pd = int(predelay_ms / 1000 * sr)
+    if pd > 0:
+        ir = torch.cat([torch.zeros(pd), ir])[:n]
+    return ir
+
+def stage_reverb(x, sr, amt, size=1.0):
+    """Convolution reverb — adds room/space as a wet send on top of the dry."""
+    decay = 0.5 + size * 1.3
+    ir = torch.stack([_reverb_ir(sr, decay, 18, 1), _reverb_ir(sr, decay, 23, 2)])
+    ir = apply_biquad(ir, *biquad("lowpass", sr, 7000, 0.707))   # darker, natural tail
+    ir = apply_biquad(ir, *biquad("highpass", sr, 200, 0.707))   # keep lows out of the verb
+    ir = ir / (ir.abs().max() + 1e-9)
+    wet = convolve_causal(x, ir)
+    wet = wet / (wet.abs().max() + 1e-9) * (float(x.abs().max()) + 1e-9)
+    return x + wet * (0.4 * amt)                # dry stays intact, ambience added
+
+def stage_dereverb(x, sr, amt, n_fft=2048, hop=512):
+    """Spectral de-reverb: per frequency bin, track a decaying peak reference;
+    when the bin's energy falls below it (the reverb tail between hits/words),
+    duck it. Direct/transient sound sits at the peak and passes untouched.
+    Bounded to ≤ ~12·amt dB so it reduces the wash without gating artifacts."""
+    win = torch.hann_window(n_fft)
+    floor = 10 ** (-(12.0 * amt) / 20)
+    rel = math.exp(-hop / (0.28 * sr))          # 280 ms tail memory
+    thr = 0.5
+    outs = []
+    for ch in range(x.shape[0]):
+        st = torch.stft(x[ch], n_fft=n_fft, hop_length=hop, window=win,
+                        return_complex=True, center=True)
+        mag = st.abs()
+        ref = torch.empty_like(mag)
+        r = mag[:, 0].clone(); ref[:, 0] = r
+        for f in range(1, mag.shape[1]):         # recursive decaying peak follower
+            r = torch.maximum(mag[:, f], r * rel)
+            ref[:, f] = r
+        ratio = mag / (ref + 1e-9)               # ~1 at peaks, <1 in tails
+        g = torch.where(ratio < thr,
+                        (ratio / thr).clamp(min=floor).pow(amt * 1.5),
+                        torch.ones_like(mag))
+        outs.append(torch.istft(st * g, n_fft=n_fft, hop_length=hop, window=win,
+                                center=True, length=x.shape[1]))
+    return torch.stack(outs)
+
 def adjust_master(path_in, path_out, ops, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0):
     """Apply a list of natural-language-derived cleanup ops to an existing
     master, then re-normalize + true-peak limit. Ops are always applied to the
@@ -768,6 +830,10 @@ def adjust_master(path_in, path_out, ops, genre="hiphop", target_lufs=-9.5, ceil
         elif t == "saturate":
             d = float(op.get("drive", 1.1))
             x = torch.tanh(x * d) / math.tanh(d)
+        elif t == "dereverb":
+            x = stage_dereverb(x, sr, float(op.get("amt", 0.5)))
+        elif t == "reverb":
+            x = stage_reverb(x, sr, float(op.get("amt", 0.4)), float(op.get("size", 1.0)))
     x = stage_loudness(x, sr, target_lufs, ceiling_db, [])
     tgt = TARGETS.get(genre, TARGETS["hiphop"])
     save_wav24(x, sr, path_out)
