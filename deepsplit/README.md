@@ -43,12 +43,20 @@ so you can nudge anything, then **BOUNCE → MASTER** or **AI ENHANCE** to finis
 3. **Separates stems** (Demucs htdemucs) and processes each adaptively:
    vocal HPF + de-essing + presence, drum transient recovery, 808 mono +
    saturation, mud clearing in the music bed
-4. **Adaptive bus chain**: resonance notches (≤3, measured), linear-phase
-   matching EQ toward the genre curve (±4 dB cap, A/B gated — reverted if it
-   doesn't measurably improve the spectrum), dynamic low-band control, gentle
-   glue, optional saturation, mono-safe stereo width
+4. **Adaptive bus chain (Ozone-parity modules, all measured + A/B gated):**
+   - **Dynamic EQ** — tames each resonant band only when it spikes (≤6 dB)
+   - **Matching EQ** — linear-phase move toward the genre curve (±4 dB cap,
+     reverted if it doesn't measurably improve the spectrum)
+   - **Multiband compressor** — 4-band (low/low-mid/mid/high), gentle ratios,
+     ≤4 dB/band, per-band timing; A/B gated, falls back to broadband glue
+   - **Harmonic exciter** — generates air (>6 kHz) and/or low-end weight when
+     the tonal analysis says a band is lacking (harmonics, not just EQ)
+   - **Multiband imager** — lows mono, mids natural, highs widened, mono-safe
 5. **Finishes** at your target LUFS with a lookahead true-peak limiter and
    verifies the result
+
+The band splitter is perfect-reconstruction (complementary subtraction — the
+bands sum back to the source at ~-126 dBFS), so unprocessed bands stay clean.
 
 Every action is listed in the report with the measured reason. On
 well-balanced material the engine does very little — by design.

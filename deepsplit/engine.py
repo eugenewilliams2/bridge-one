@@ -395,13 +395,6 @@ def process_stems(stems, sr, m, norm, target, actions):
     return stems
 
 # ---------------------------------------------------------------- bus stages
-def stage_notches(x, sr, actions):
-    notches = find_resonances(x, sr)
-    for f, cut in notches:
-        x = apply_biquad(x, *biquad("peak", sr, f, 8.0, -cut))
-        actions.append(f"bus: notched resonance at {f:.0f} Hz (-{cut:.1f} dB, Q 8)")
-    return x
-
 def stage_match_eq(x, sr, target, actions):
     _, spec = band_spectrum(x, sr)
     diff = np.clip(target - normalize_curve(spec), -4, 4)
@@ -440,17 +433,6 @@ def stage_saturate(x, sr, actions):
     actions.append("bus: subtle tape-style saturation for warmth/density")
     return torch.tanh(x * drive) / math.tanh(drive)
 
-def stage_stereo(x, sr, m, actions):
-    mid = (x[0] + x[1]) * 0.5
-    side = (x[0] - x[1]) * 0.5
-    side = apply_biquad(side[None], *biquad("highpass", sr, 120, 0.707))[0]
-    changed = ["bus: lows mono’d below 120 Hz for club/mono safety"]
-    if m["correlation"] > 0.92:
-        side = side * 1.25
-        changed.append("bus: stereo width +25% on the sides (image was narrow)")
-    actions.extend(changed)
-    return torch.stack([mid + side, mid - side])
-
 def stage_loudness(x, sr, target_lufs, ceiling_db, actions):
     cur = lufs(x, sr)
     x = x * 10 ** ((target_lufs - cur) / 20)
@@ -470,6 +452,108 @@ def stage_loudness(x, sr, target_lufs, ceiling_db, actions):
     actions.append(f"bus: normalized to {target_lufs} LUFS, true-peak limited "
                    f"(max GR {gr_db:.1f} dB, ceiling {ceiling_db} dBTP)")
     return y
+
+# ---------------------------------------------------------------- Ozone-parity
+def split_bands(x, sr, freqs):
+    """Perfect-reconstruction band split by complementary subtraction — the
+    bands sum back to x exactly, so unprocessed bands are transparent. Each
+    crossover is a doubled 2nd-order lowpass (~24 dB/oct)."""
+    bands, rem = [], x
+    for f in freqs:
+        lp = apply_biquad(apply_biquad(rem, *biquad("lowpass", sr, f, 0.707)),
+                          *biquad("lowpass", sr, f, 0.707))
+        bands.append(lp)
+        rem = rem - lp
+    bands.append(rem)
+    return bands
+
+def _band_thr(env, q=0.80):
+    es = env.flatten()
+    if es.numel() > 1_000_000:
+        es = es[::es.numel() // 1_000_000]
+    return float(torch.quantile(es, q))
+
+def stage_multiband_comp(x, sr, actions):
+    """Ozone Dynamics: 4-band compressor. Each band is tightened only where it
+    peaks above its own 80th-percentile level, with gentle ratios and per-band
+    timing (slow lows, fast highs). ≤4 dB GR/band."""
+    bands = split_bands(x, sr, [120, 500, 3500])
+    names = ["low", "low-mid", "mid", "high"]
+    ratio = [2.2, 2.0, 1.8, 2.0]
+    atk_ms = [30, 22, 15, 8]
+    out, touched = None, []
+    for i, b in enumerate(bands):
+        env = onepole(b.pow(2).mean(0, keepdim=True), sr, atk_ms[i]).sqrt()
+        thr = _band_thr(env)
+        if thr < 1e-5:
+            out = b if out is None else out + b
+            continue
+        over_db = 20 * torch.log10((env / thr).clamp(min=1.0))
+        gr = 10 ** (-(over_db * (1 - 1 / ratio[i])).clamp(max=4.0) / 20)
+        gr = onepole(gr, sr, [130, 100, 70, 45][i])
+        if float((gr < 0.9).float().mean()) > 0.02:
+            b = b * gr
+            touched.append(names[i])
+        out = b if out is None else out + b
+    if touched:
+        actions.append("multiband comp: " + ", ".join(touched) +
+                       " band(s) tightened (gentle ratio, ≤4 dB)")
+    return out
+
+def stage_dynamic_eq(x, sr, actions):
+    """Ozone Dynamic EQ: instead of static notches, attenuate each resonant
+    band only in the instants it spikes — more transparent, keeps the tone
+    everywhere else."""
+    res = find_resonances(x, sr, max_n=3)
+    n = 0
+    for f, exc in res:
+        bp = apply_biquad(apply_biquad(x, *biquad("highpass", sr, f / 1.30, 1.0)),
+                          *biquad("lowpass", sr, f * 1.30, 1.0))
+        env = onepole(bp.pow(2).mean(0, keepdim=True), sr, 8).sqrt()
+        thr = _band_thr(env, 0.75)
+        if thr < 1e-5:
+            continue
+        red = (1 - (env / thr).clamp(min=1.0).pow(-0.7)).clamp(0, 0.5)  # ≤6 dB
+        red = onepole(red, sr, 25)
+        if float((red > 0.06).float().mean()) < 0.02:
+            continue
+        x = x - bp * red
+        n += 1
+        actions.append(f"dynamic EQ: {f:.0f} Hz tamed only when it spikes (≤6 dB, dynamic)")
+    return x
+
+def stage_multiband_image(x, sr, m, actions):
+    """Ozone Imager: width per band — lows mono, mids natural, highs opened.
+    Narrower sources get pushed wider; already-wide ones are left alone."""
+    corr = m["correlation"]
+    hi_w = 1.35 if corr > 0.9 else 1.15 if corr > 0.6 else 1.0
+    bands = split_bands(x, sr, [120, 2500])
+    widths = [0.0, 1.12, hi_w]          # low fully mono, mid gentle, high wide
+    out = None
+    for b, wd in zip(bands, widths):
+        mid = (b[0] + b[1]) * 0.5
+        side = (b[0] - b[1]) * 0.5 * wd
+        band = torch.stack([mid + side, mid - side])
+        out = band if out is None else out + band
+    actions.append(f"multiband imager: lows mono · mids natural · highs ×{hi_w:.2f} (mono-safe)")
+    return out
+
+def stage_exciter(x, sr, norm, target, actions):
+    """Ozone Exciter / Low End Focus: generate harmonics rather than just EQ —
+    tape-style warmth in the low band and/or airy odd harmonics up top, only
+    where the tonal analysis says the band is lacking."""
+    changed = []
+    if region_db(norm - target, 8000, 16000) < -1.0:
+        high = x - apply_biquad(x, *biquad("lowpass", sr, 6000, 0.707))
+        x = x + torch.tanh(high * 3.0) * 0.14
+        changed.append("air above 6 kHz")
+    if region_db(norm - target, 35, 90) < -1.0:
+        low = apply_biquad(x, *biquad("lowpass", sr, 90, 0.707))
+        x = x + (torch.tanh(low * 2.0) / math.tanh(2.0) - low) * 0.35
+        changed.append("low-end weight")
+    if changed:
+        actions.append("harmonic exciter: added " + " + ".join(changed) + " (generated harmonics, not just EQ)")
+    return x
 
 # ---------------------------------------------------------------- pipeline
 def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0,
@@ -510,10 +594,10 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
             actions.insert(0, "ML source separation → per-stem processing → remix")
         except Exception as e:  # noqa: BLE001 — stems are an upgrade, not a requirement
             actions.append(f"stem stage skipped ({e}) — bus-only processing")
-    prog(58, "resonance sweep")
-    x = stage_notches(x, sr, actions)
+    prog(56, "dynamic EQ (resonance control)")
+    x = stage_dynamic_eq(x, sr, actions)
 
-    prog(64, "tonal balance (matching EQ, A/B gated)")
+    prog(62, "tonal balance (matching EQ, A/B gated)")
     ex_before = quality_score(excerpt(x, sr), sr, target)
     y, applied = stage_match_eq(x, sr, target, actions)
     if applied:
@@ -523,20 +607,30 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
             actions[-1] += " — reverted (no measurable improvement)"
     del y
 
-    prog(74, "low-end control")
+    prog(68, "low-end control")
     x = stage_low_control(x, sr, actions)
 
-    if m["crest_db"] > 9.5:
-        prog(78, "glue compression")
-        x = stage_glue(x, sr, actions)
+    # Multiband compressor (Ozone Dynamics) — A/B gated; falls back to broadband
+    # glue if it doesn't help. Replaces the single-band glue as the main tool.
+    if m["crest_db"] > 9.0:
+        prog(74, "multiband compression (A/B gated)")
+        s_before = quality_score(excerpt(x, sr), sr, target)
+        y = stage_multiband_comp(x, sr, actions)
+        if quality_score(excerpt(y, sr), sr, target) <= s_before + 0.05:
+            x = y
+        else:
+            actions[-1] += " — reverted (broadband glue instead)"
+            x = stage_glue(x, sr, actions)
+        del y
 
+    prog(80, "harmonic exciter")
+    x = stage_exciter(x, sr, norm, target, actions)
     warm = region_db(norm - target, 200, 500)
     if warm < 0.5 and m["crest_db"] > 9:
-        prog(82, "harmonic color")
         x = stage_saturate(x, sr, actions)
 
-    prog(86, "stereo image")
-    x = stage_stereo(x, sr, m, actions)
+    prog(86, "multiband stereo image")
+    x = stage_multiband_image(x, sr, m, actions)
 
     prog(90, "loudness + true-peak limiting")
     x = stage_loudness(x, sr, target_lufs, ceiling_db, actions)
