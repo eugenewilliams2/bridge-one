@@ -99,6 +99,22 @@ glue with tube color), **vintageeq** (Pultec low boost-and-cut + air). Say
 re-applies the full cumulative set to the original master each time (no
 generation loss; `reset` clears it, `save` downloads the result).
 
+## AI chat (optional)
+
+MASTER CHAT works out of the box with a local keyword parser (no account, 100%%
+offline). To upgrade it to a real conversational assistant that understands
+anything ("it's boxy and the vocal's buried, give it that Travis low end"),
+set an Anthropic API key before launching the engine:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...   # from console.anthropic.com
+```
+
+The engine then reports `ai:true` on `/health` and routes chat through Claude
+(Opus 4.8, tool use) to map your words to the exact DSP ops. **Only your text +
+the numeric analysis are sent to the API — the audio never leaves the machine.**
+Any failure (no key, offline) silently falls back to the local parser.
+
 ## Reference mastering (commercial-ready)
 
 In the REF tab, search a commercial track (or load a local full-quality file you

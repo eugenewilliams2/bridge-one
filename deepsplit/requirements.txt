@@ -1,3 +1,4 @@
 demucs>=4.0.1
 soundfile
 torchcodec
+anthropic

@@ -218,8 +218,13 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/health":
             with LOCK:
                 busy = JOB["state"] == "running"
+            try:
+                import chat as _chat
+                ai = _chat.available()
+            except Exception:
+                ai = False
             self._json(200, {"ok": True, "engine": "demucs", "model": MODEL,
-                             "device": DEVICE, "busy": busy})
+                             "device": DEVICE, "busy": busy, "ai": ai})
         elif u.path == "/status":
             with LOCK:
                 self._json(200, {k: JOB[k] for k in ("id", "state", "pct", "msg")})
@@ -295,6 +300,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if u.path == "/setref":
             self._handle_setref()
+            return
+        if u.path == "/chat":
+            self._handle_chat()
             return
         if u.path not in ("/split", "/enhance", "/aimix"):
             self._json(404, {"error": "not found"})
@@ -450,6 +458,52 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_chat(self):
+        """AI chat turn: map the user's plain-English note to the DSP op list via
+        Claude. Only text + numeric analysis leave the machine (never audio).
+        Returns {reply, ops, target_lufs}; on any failure returns fallback:true
+        so the app uses its local keyword parser instead."""
+        with LOCK:
+            orig = JOB.get("master_orig")
+            genre = JOB.get("genre", "hiphop")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            req = json.loads(self.rfile.read(length) or b"{}") if length else {}
+        except Exception:
+            self._json(400, {"error": "bad JSON body"})
+            return
+        if not orig or not os.path.exists(orig):
+            self._json(409, {"error": "run AI ENHANCE first", "fallback": True})
+            return
+        try:
+            import chat, engine
+            if not chat.available():
+                self._json(200, {"fallback": True, "reason": "no API key"})
+                return
+            x, sr = engine.load_audio(orig)
+            m, norm = engine.analyze(x, sr)
+            tgt = engine.TARGETS.get(genre, engine.TARGETS["hiphop"])
+            def reg(curve, lo, hi):
+                return engine.region_db(curve, lo, hi)
+            analysis = {
+                "lufs": m["lufs"], "tp": m["true_peak_db"], "crest": m["crest_db"],
+                "corr": m["correlation"],
+                "sub": round(reg(norm, 35, 120) - reg(tgt, 35, 120), 1),
+                "low": round(reg(norm, 120, 300) - reg(tgt, 120, 300), 1),
+                "lowmid": round(reg(norm, 300, 800) - reg(tgt, 300, 800), 1),
+                "pres": round(reg(norm, 3000, 6000) - reg(tgt, 3000, 6000), 1),
+                "air": round(reg(norm, 8000, 16000) - reg(tgt, 8000, 16000), 1),
+            }
+            target = {"sub": round(reg(tgt, 35, 120), 1), "low": round(reg(tgt, 120, 300), 1),
+                      "lowmid": round(reg(tgt, 300, 800), 1), "pres": round(reg(tgt, 3000, 6000), 1),
+                      "air": round(reg(tgt, 8000, 16000), 1)}
+            out = chat.llm_chat(req.get("message", ""), req.get("history") or [],
+                                req.get("ops") or [], genre, analysis, target)
+            self._json(200, out)
+        except Exception as e:  # noqa: BLE001 — any failure → local parser
+            print(f"chat failed: {e}", file=sys.stderr)
+            self._json(200, {"fallback": True, "reason": str(e)[:160]})
 
     def _handle_adjust(self):
         """Synchronous cleanup: apply chat-derived ops to the current AI master

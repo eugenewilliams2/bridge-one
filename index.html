@@ -491,7 +491,7 @@
 
     <div class="chatPanel" id="masterChat">
       <h2>MASTER CHAT
-        <span style="margin-left:auto;font-size:8.5px;color:var(--dim);letter-spacing:1px">tell me what to fix · 100% local</span>
+        <span id="chatMode" style="margin-left:auto;font-size:8.5px;color:var(--dim);letter-spacing:1px">tell me what to fix · 100% local</span>
       </h2>
       <div class="chatLog" id="chatLog" aria-live="polite"></div>
       <div class="chatChips" id="chatChips">
@@ -1298,7 +1298,7 @@ splitPicker.addEventListener("change",()=>{
 });
 
 /* ---------- Deep Split engine (local Demucs server, auto-detected) ---------- */
-const DEEP={url:"http://127.0.0.1:8765", ok:false, model:""};
+const DEEP={url:"http://127.0.0.1:8765", ok:false, model:"", ai:false};
 let linphase=false, deepStems=false;
 $("btnLinphase").addEventListener("click",()=>{
   linphase=!linphase;
@@ -1313,7 +1313,7 @@ async function deepCheck(){
   try{
     const c=new AbortController(); const t=setTimeout(()=>c.abort(),1200);
     const r=await fetch(DEEP.url+"/health",{signal:c.signal}); clearTimeout(t);
-    const j=await r.json(); DEEP.ok=!!j.ok; DEEP.model=j.model||"";
+    const j=await r.json(); DEEP.ok=!!j.ok; DEEP.model=j.model||""; DEEP.ai=!!j.ai;
   }catch(e){ DEEP.ok=false; }
   $("btnDeepSplit").style.display=DEEP.ok?"":"none";
   $("aiMixRow").style.display=DEEP.ok?"flex":"none";
@@ -2026,7 +2026,8 @@ function renderBalanceMeter(d){
 /* cumulative, structured so successive notes compound cleanly and reset works.
    All ops are re-applied to the ORIGINAL AI master each send (no gen loss). */
 let chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tape:0, vcomp:0, veq:0, tgt:null, notes:0};
-function chatReset(){ chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tape:0, vcomp:0, veq:0, tgt:P.tgt, notes:0}; }
+let aiOps=null, chatHistory=[];   /* aiOps!=null → AI is driving the chain this session */
+function chatReset(){ chat={eq:{}, width:1.0, deess:0, drive:1.0, dereverb:0, reverb:0, tape:0, vcomp:0, veq:0, tgt:P.tgt, notes:0}; aiOps=null; chatHistory=[]; }
 function chatOps(){
   const ops=[];
   for(const k in chat.eq){
@@ -2121,7 +2122,7 @@ async function sendChat(text){
   $("chatIn").value="";
   const p=parseMasterChat(text);
   if(p.cmd==="reset"){
-    chatReset(); chatBusy=true;
+    chatReset(); aiOps=null; chatHistory=[]; chatBusy=true;
     const thinking=chatSay("bot","reverting to the original AI master…");
     try{ const rep=await postAdjust(); await applyAdjust(rep);
       thinking.innerHTML="Back to the original AI master — all my tweaks undone. "+scoreLine(rep); }
@@ -2137,7 +2138,31 @@ async function sendChat(text){
     catch(e){ chatSay("bot","Couldn't grab the file — "+esc(e.message)); }
     return;
   }
-  // adjust
+  // AI path — real conversational understanding when the engine has an API key
+  if(DEEP.ai){
+    chatBusy=true;
+    const thinking=chatSay("bot","thinking…");
+    try{
+      const r=await fetch(DEEP.url+"/chat",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({message:text,history:chatHistory,ops:(aiOps!==null?aiOps:chatOps())})});
+      const j=await r.json().catch(()=>({fallback:true}));
+      if(r.ok && !j.fallback){
+        aiOps=Array.isArray(j.ops)?j.ops:[];
+        if(j.target_lufs!=null) chat.tgt=Math.max(-16,Math.min(-6,+j.target_lufs));
+        const rep=await postAdjust();
+        await applyAdjust(rep);
+        chatHistory.push({role:"user",content:text});
+        chatHistory.push({role:"assistant",content:j.reply||"Done."});
+        if(chatHistory.length>16) chatHistory=chatHistory.slice(-16);
+        thinking.innerHTML=esc(j.reply||"Done.")+"<br>"+scoreLine(rep)+
+          "<br><span class='mini'>PLAY to hear it · <b>save</b> when it's right · <b>reset</b> to undo all</span>";
+        chatBusy=false; return;
+      }
+      thinking.remove();   // engine said fall back (no key / API error) → local parser
+    }catch(e){ thinking.remove(); }
+    chatBusy=false;
+  }
+  // local keyword parser (AI off, or fell back)
   if(p.unknown && !p.applied.length){
     chatSay("bot","I didn't catch a change in that. Try things like <b>more bass</b>, <b>brighter / more air</b>, <b>less harsh</b>, <b>clear the mud</b>, <b>wider</b>, <b>less reverb / drier</b>, <b>more space</b>, <b>tape warmth</b>, <b>vintage compression</b>, <b>Pultec EQ</b>, <b>punchier</b>, <b>louder</b> — or <b>reset</b> / <b>save</b>.");
     return;
@@ -2163,7 +2188,7 @@ function scoreLine(rep){
 }
 async function postAdjust(){
   const r=await fetch(DEEP.url+"/adjust",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ops:chatOps(),genre:(masterGenre||"hiphop"),lufs:(chat.tgt??P.tgt),ceiling:P.ceil})});
+    body:JSON.stringify({ops:(aiOps!==null?aiOps:chatOps()),genre:(masterGenre||"hiphop"),lufs:(chat.tgt??P.tgt),ceiling:P.ceil})});
   if(r.status===409) throw new Error("run AI ENHANCE first");
   if(r.status===429) throw new Error("engine busy");
   if(!r.ok) throw new Error("engine error "+r.status);
@@ -2184,8 +2209,13 @@ let masterGenre="hiphop";
 function showMasterChat(genre){
   masterGenre=genre||masterGenre; chatReset();
   $("masterChat").classList.add("on");
+  const hdr=$("chatMode"); if(hdr) hdr.innerHTML=DEEP.ai
+    ? "<b style='color:var(--gold)'>AI</b> · understands anything · text-only to Claude, audio stays local"
+    : "keyword mode · 100% local";
   if(!$("chatLog").childElementCount)
-    chatSay("bot","Master's loaded. Tell me what to fix in plain English — <b>less low end</b>, <b>open up the top</b>, <b>tame the harsh vocals</b>, <b>a bit wider</b>, <b>less reverb</b>, <b>more space</b>, <b>punchier</b>, <b>louder</b>. Say <b>save</b> to download or <b>reset</b> to undo everything.");
+    chatSay("bot", DEEP.ai
+      ? "Master's loaded. Talk to me like a real engineer — <b>“it’s a bit boxy and the vocal’s buried, give it that Travis low end”</b>, <b>“warmer but keep the top crisp”</b>, whatever you hear. Say <b>save</b> to download or <b>reset</b> to undo everything."
+      : "Master's loaded. Tell me what to fix in plain English — <b>less low end</b>, <b>open up the top</b>, <b>tame the harsh vocals</b>, <b>a bit wider</b>, <b>less reverb</b>, <b>more space</b>, <b>punchier</b>, <b>louder</b>. Say <b>save</b> to download or <b>reset</b> to undo everything.");
 }
 $("chatSend").addEventListener("click",()=>sendChat($("chatIn").value));
 $("chatIn").addEventListener("keydown",e=>{ if(e.key==="Enter"){e.preventDefault();sendChat($("chatIn").value);} });
