@@ -108,12 +108,15 @@ TARGETS = {
     "travis": _target([(25, 12), (45, 16), (80, 16), (120, 14.4), (200, 9.3), (400, 5.7),
                        (800, -0.2), (1500, -3.7), (3000, -8.6), (5000, -10.7), (8000, -12),
                        (12000, -12), (18000, -12)]),
+    "toliver": _target([(25, 14.8), (45, 16), (80, 16), (120, 12.1), (200, 7.3), (400, 4.8),
+                        (800, 0.9), (1500, -2.9), (3000, -8.2), (5000, -10.7), (8000, -12),
+                        (12000, -12), (18000, -12)]),
 }
 # Per-genre reference loudness (median of the same real masters).
-GENRE_LUFS = {"hiphop": -8.9, "rnb": -10.2, "pop": -8.6, "travis": -8.3}
+GENRE_LUFS = {"hiphop": -8.9, "rnb": -10.2, "pop": -8.6, "travis": -8.3, "toliver": -9.3}
 # Per-genre reference correlation — how wide real masters in each lane actually
 # are. The imager uses this so it never over-widens past the genre norm.
-GENRE_CORR = {"hiphop": 0.90, "rnb": 0.85, "pop": 0.75, "travis": 0.90}
+GENRE_CORR = {"hiphop": 0.90, "rnb": 0.85, "pop": 0.75, "travis": 0.90, "toliver": 0.89}
 
 # ---------------------------------------------------------------- primitives
 def biquad(kind, sr, f0, Q, gain_db=0.0):
@@ -213,6 +216,14 @@ def out_spectrum(x, sr):
     """Mid-anchored long-term spectrum of a signal, for the tonal-balance meter."""
     _, spec = band_spectrum(x, sr)
     return [round(float(v), 2) for v in normalize_curve(spec).tolist()]
+
+def ref_profile(path):
+    """Analyze a reference track → the target payload for reference-matching:
+    its measured 30-band curve, loudness, correlation, and crest."""
+    x, sr = load_audio(path)
+    m, _ = analyze(x, sr)
+    return {"curve": m["spectrum_db"], "lufs": m["lufs"],
+            "corr": m["correlation"], "crest": m["crest_db"]}
 
 def balance_meter(target, before, after):
     """Payload the app's Tonal Balance meter draws: log-freq band centers, the
@@ -430,17 +441,24 @@ def process_stems(stems, sr, m, norm, target, actions):
     return stems
 
 # ---------------------------------------------------------------- bus stages
-def stage_match_eq(x, sr, target, actions):
-    _, spec = band_spectrum(x, sr)
-    diff = np.clip(target - normalize_curve(spec), -4, 4)
-    diff[BAND_HZ < 30] = 0
-    diff[BAND_HZ > 17000] = 0
-    diff = np.convolve(diff, np.ones(3) / 3, mode="same")
-    if np.abs(diff).max() < 0.75:
-        return x, False
-    h = fir_from_curve(BAND_HZ, diff, sr)
-    actions.append(f"bus: matching EQ toward genre curve (max {np.abs(diff).max():.1f} dB, linear phase)")
-    return fft_convolve(x, h), True
+def stage_match_eq(x, sr, target, actions, passes=2):
+    """Linear-phase matching EQ toward the target curve. Iterates so a source
+    far from target converges precisely instead of stopping at the ±4 dB/pass
+    cap — this is what makes reference-matching actually land on the curve."""
+    applied = False
+    for p in range(passes):
+        _, spec = band_spectrum(x, sr)
+        diff = np.clip(target - normalize_curve(spec), -4, 4)
+        diff[BAND_HZ < 30] = 0
+        diff[BAND_HZ > 17000] = 0
+        diff = np.convolve(diff, np.ones(3) / 3, mode="same")
+        if np.abs(diff).max() < (0.75 if p == 0 else 0.4):
+            break
+        x = fft_convolve(x, fir_from_curve(BAND_HZ, diff, sr))
+        applied = True
+    if applied:
+        actions.append("bus: matching EQ toward target curve (linear phase, iterated to convergence)")
+    return x, applied
 
 def stage_low_control(x, sr, actions):
     low = apply_biquad(apply_biquad(x, *biquad("lowpass", sr, 150, 0.707)),
@@ -681,7 +699,8 @@ def stage_exciter(x, sr, norm, target, actions):
 
 # ---------------------------------------------------------------- pipeline
 def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0,
-            use_stems=True, model="htdemucs", device="cpu", linphase=False, progress=None):
+            use_stems=True, model="htdemucs", device="cpu", linphase=False,
+            ref_curve=None, ref_corr=None, ref_name=None, progress=None):
     def prog(p, msg):
         if progress: progress(p, msg)
 
@@ -691,11 +710,20 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
     prog(6, "analyzing source")
     m, norm = analyze(x, sr)
     genre_conf, genre_scores = None, None
-    if genre == "auto" or genre not in TARGETS:
-        genre, genre_conf, genre_scores = classify_genre(m, norm)
-    target = TARGETS[genre]
+    if ref_curve is not None:
+        # reference match: aim at a specific commercial track's measured curve
+        target = np.asarray(ref_curve, dtype=float)
+        tcorr = ref_corr if ref_corr else 0.88
+        genre = "reference"
+    else:
+        if genre == "auto" or genre not in TARGETS:
+            genre, genre_conf, genre_scores = classify_genre(m, norm)
+        target = TARGETS[genre]
+        tcorr = GENRE_CORR.get(genre, 0.88)
     issues = detect_issues(m, norm, target)
     actions = []
+    if ref_curve is not None:
+        actions.append(f"reference match: aiming at {ref_name or 'your reference track'}'s exact spectrum + width")
     if genre_conf is not None:
         actions.append(f"genre auto-detected: {genre} ({int(genre_conf*100)}% confidence, from spectrum + dynamics)")
     if linphase:
@@ -769,7 +797,7 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
         x = stage_saturate(x, sr, actions)
 
     prog(86, "multiband stereo image")
-    x = stage_multiband_image(x, sr, m, actions, GENRE_CORR.get(genre, 0.88), linphase)
+    x = stage_multiband_image(x, sr, m, actions, tcorr, linphase)
 
     prog(90, "loudness + true-peak limiting")
     x = stage_loudness(x, sr, target_lufs, ceiling_db, actions)

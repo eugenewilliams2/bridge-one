@@ -99,6 +99,14 @@ glue with tube color), **vintageeq** (Pultec low boost-and-cut + air). Say
 re-applies the full cumulative set to the original master each time (no
 generation loss; `reset` clears it, `save` downloads the result).
 
+## Reference mastering (commercial-ready)
+
+In the REF tab, search a commercial track (or load a local full-quality file you
+own) → **MASTER MY TRACK TO THIS**. The engine profiles that reference's exact
+30-band spectrum + loudness + stereo width (`POST /setref`) and AI ENHANCE then
+matches your track to it (`/enhance?ref=1`) — the pro workflow (Ozone/Matchering).
+Built-in artist targets: TRAVIS + DON TOLIVER (empirical, from real masters).
+
 ## Performance
 
 AI ENHANCE defaults to **fast bus mastering** (no stem separation) — ~7 s for a

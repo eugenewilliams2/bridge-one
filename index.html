@@ -313,6 +313,13 @@
   .mrows .mb .v.ok{color:var(--green);} .mrows .mb .v.warn{color:var(--gold);} .mrows .mb .v.hot{color:var(--red);}
 
   /* master chat */
+  .refBadge{display:none;align-items:center;gap:9px;margin-top:9px;padding:9px 13px;border-radius:8px;
+    border:1px solid var(--gold-dim);background:linear-gradient(180deg,rgba(232,180,92,.14),rgba(232,180,92,.04));
+    color:var(--gold-hi);font-size:11px;letter-spacing:1px;}
+  .refBadge svg{width:15px;height:15px;flex:none;}
+  .refBadge b{color:#FFF6E3;}
+  .refBadge button{margin-left:auto;min-height:26px;min-width:26px;padding:0 8px;border-radius:6px;
+    border:1px solid var(--line-hi);background:var(--panel);color:var(--muted);font-size:11px;}
   .chatPanel{display:none;margin-top:16px;background:linear-gradient(180deg,var(--panel-hi),var(--panel) 30%);
     border:1px solid var(--line);border-top-color:var(--line-hi);border-radius:12px;padding:14px 16px;
     box-shadow:0 10px 26px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.045);}
@@ -399,7 +406,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4v6m0 4v6M12 4v9m0 4v3M19 4v3m0 4v9"/><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="15" r="2" fill="currentColor"/><circle cx="19" cy="9" r="2" fill="currentColor"/></svg>
         AI MIX (AUTO-BALANCE)</button>
       <select id="mixGenreSel" aria-label="Mix genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;flex:0 0 auto">
-        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="toliver">DON TOLIVER</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
     <div id="stemList"></div>
@@ -465,7 +472,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
         AI ENHANCE (DEEP ENGINE)</button>
       <select id="genreSel" aria-label="Genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;">
-        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="toliver">DON TOLIVER</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
     <button class="phaseToggle" id="btnLinphase" role="switch" aria-checked="false" aria-label="Linear-phase processing">
@@ -476,6 +483,11 @@
       <span class="dot"></span><span>DEEP (STEMS)</span>
       <span class="hint2">per-stem AI processing · ~10× slower</span>
     </button>
+    <div class="refBadge" id="refBadge" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 12l4-4"/></svg>
+      <span>matching: <b id="refBadgeName"></b></span>
+      <button id="btnClearRef" aria-label="Clear reference">✕</button>
+    </div>
 
     <div class="chatPanel" id="masterChat">
       <h2>MASTER CHAT
@@ -1296,6 +1308,7 @@ $("btnDeep").addEventListener("click",()=>{
   deepStems=!deepStems;
   $("btnDeep").setAttribute("aria-checked",deepStems?"true":"false");
 });
+$("btnClearRef").addEventListener("click",()=>{ activeRef=null; updateRefBadge(); logLine("reference cleared — AI ENHANCE back to genre target"); });
 async function deepCheck(){
   try{
     const c=new AbortController(); const t=setTimeout(()=>c.abort(),1200);
@@ -1675,6 +1688,34 @@ async function refAnalyze(buf,label){
   progSet(1,"DONE"); setTimeout(progHide,500);
   renderRefCard();
 }
+/* send the reference to the engine as the reference-match target for AI ENHANCE */
+let activeRef=null;
+async function masterToThis(){
+  if(!REF.buffer||!DEEP.ok) return;
+  const btn=$("btnMasterToThis"); if(btn){btn.disabled=true;btn.textContent="ANALYZING…";}
+  try{
+    const L=copyCh(REF.buffer,0), R=copyCh(REF.buffer,1), sr=REF.buffer.sampleRate;
+    const enc=await dsp("encodewav",{L,R,sr},[L.buffer,R.buffer]);
+    const hdrName=REF.name.replace(/[^\x20-\x7E]/g,"-").slice(0,120);  // HTTP headers must be ISO-8859-1
+    const r=await fetch(DEEP.url+"/setref",{method:"POST",headers:{"X-Filename":hdrName},
+      body:new Blob([enc.wav],{type:"audio/wav"})});
+    if(!r.ok) throw new Error("engine error "+r.status);
+    const j=await r.json();
+    activeRef={name:j.name,lufs:j.lufs};
+    updateRefBadge();
+    logReset(); logLine("<b>reference set:</b> "+esc(j.name)+" ("+j.lufs.toFixed(1)+" LUFS) — AI ENHANCE will now match its exact spectrum, width &amp; loudness");
+    logLine("go to <b>MASTER</b> and hit <b>AI ENHANCE</b> to master your track to this reference");
+    switchTab("pageMaster");
+  }catch(e){
+    logLine("couldn't set reference — "+esc(e.message));
+  }
+  if(btn){btn.disabled=false;btn.textContent="MASTER MY TRACK TO THIS";}
+}
+function updateRefBadge(){
+  const b=$("refBadge"); if(!b) return;
+  if(activeRef){ b.style.display="flex"; b.querySelector("#refBadgeName").textContent=activeRef.name; }
+  else b.style.display="none";
+}
 function renderRefCard(){
   const host=$("refCard");
   if(!REF.analysis){ host.innerHTML=""; return; }
@@ -1705,13 +1746,16 @@ function renderRefCard(){
     '<div class="refBtns">'+
     '<button id="btnRefPlay" class="play"><svg viewBox="0 0 24 24" style="fill:currentColor"><path d="M7 4l13 8-13 8z"/></svg><span id="refPlayLbl">PLAY REF</span></button>'+
     '<button id="btnRefMatch">MATCH TARGET ('+clampTgt(REF.analysis.lufs).toFixed(1)+' LUFS)</button>'+
-    '</div><div class="fine" style="color:var(--dim);font-size:9.5px;margin-top:9px;line-height:1.6">REF playback is loudness-matched to your mastering target so the A/B is fair — louder ≠ better.</div></div>';
+    '</div>'+
+    (DEEP.ok?'<div class="refBtns"><button id="btnMasterToThis" style="flex:1;border-color:var(--gold-dim);color:var(--gold-hi)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><circle cx="12" cy="12" r="8"/><path d="M12 12l4-4"/></svg> MASTER MY TRACK TO THIS</button></div>':'')+
+    '<div class="fine" style="color:var(--dim);font-size:9.5px;margin-top:9px;line-height:1.6">MATCH TARGET just sets loudness. <b style="color:var(--gold)">MASTER MY TRACK TO THIS</b> makes AI ENHANCE match this reference’s full spectrum + width + loudness — reference mastering.</div></div>';
   $("btnRefPlay").addEventListener("click",refPlayToggle);
   $("btnRefMatch").addEventListener("click",()=>{
     setParams(Object.assign({},P,{tgt:clampTgt(REF.analysis.lufs)}));
     deselectChips();
     logReset(); logLine("target matched to reference: <b>"+clampTgt(REF.analysis.lufs).toFixed(1)+" LUFS</b>");
   });
+  const b2t=$("btnMasterToThis"); if(b2t) b2t.addEventListener("click",masterToThis);
   function row(k,v,ref){return '<div class="arow"><span class="k">'+k+'</span><span class="v'+(ref?" ref":"")+'">'+v+'</span></div>';}
   function cmp(mine,ref,unit){
     const d=mine-ref;
@@ -1886,9 +1930,10 @@ async function aiEnhance(){
       body=new Blob([res.wav],{type:"audio/wav"}); name=fileName+".wav";
     }
     const genre=$("genreSel").value;
-    logLine("AI enhance <b>"+esc(name)+"</b> · "+genre+" · target "+P.tgt+" LUFS · "+(deepStems?"deep (stems)":"fast (bus)")+(linphase?" · linear phase":"")+" · 100% on this machine");
+    const useRef=!!activeRef;
+    logLine("AI enhance <b>"+esc(name)+"</b> · "+(useRef?"matching <b>"+esc(activeRef.name)+"</b>":genre+" · target "+P.tgt+" LUFS")+" · "+(deepStems?"deep (stems)":"fast (bus)")+(linphase?" · linear phase":"")+" · 100% on this machine");
     progShow("SENDING TO DEEP ENGINE",true);
-    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(P.tgt)+"&linphase="+(linphase?1:0)+"&deep="+(deepStems?1:0),
+    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(P.tgt)+"&linphase="+(linphase?1:0)+"&deep="+(deepStems?1:0)+"&ref="+(useRef?1:0),
       {method:"POST",headers:{"X-Filename":name},body});
     if(r.status===429) throw new Error("engine is busy with another song");
     if(!r.ok) throw new Error("engine error "+r.status);

@@ -40,9 +40,10 @@ MAX_UPLOAD = 300 * 1024 * 1024
 
 JOB = {"id": None, "state": "idle", "pct": 0, "msg": "", "dir": None, "err": "",
        "type": None, "out": None, "report": None}
+REF_PROFILE = {}          # active reference-match target: {curve, lufs, corr, crest, name}
 LOCK = threading.Lock()
 
-def run_enhance(job_id, src_path, workdir, genre, target_lufs, linphase, use_stems):
+def run_enhance(job_id, src_path, workdir, genre, target_lufs, linphase, use_stems, ref=None):
     out_path = os.path.join(workdir, "master.wav")
     with LOCK:
         JOB.update(state="running", pct=1, msg="starting engine")
@@ -54,7 +55,9 @@ def run_enhance(job_id, src_path, workdir, genre, target_lufs, linphase, use_ste
                     JOB.update(pct=int(pct), msg=msg)
         report = engine.enhance(src_path, out_path, genre=genre,
                                 target_lufs=target_lufs, device=DEVICE,
-                                model=MODEL, linphase=linphase, use_stems=use_stems, progress=prog)
+                                model=MODEL, linphase=linphase, use_stems=use_stems,
+                                ref_curve=(ref or {}).get("curve"), ref_corr=(ref or {}).get("corr"),
+                                ref_name=(ref or {}).get("name"), progress=prog)
         with LOCK:
             if JOB["id"] == job_id:
                 JOB.update(state="done", pct=100, msg="master ready",
@@ -290,6 +293,9 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/fx":
             self._handle_fx()
             return
+        if u.path == "/setref":
+            self._handle_setref()
+            return
         if u.path not in ("/split", "/enhance", "/aimix"):
             self._json(404, {"error": "not found"})
             return
@@ -331,8 +337,12 @@ class Handler(BaseHTTPRequestHandler):
             tgt = min(-5.0, max(-20.0, tgt))
             linphase = (q.get("linphase") or ["0"])[0] in ("1", "true", "yes")
             use_stems = (q.get("deep") or ["0"])[0] in ("1", "true", "yes")
+            with LOCK:
+                ref = dict(REF_PROFILE) if (q.get("ref") or ["0"])[0] in ("1", "true", "yes") and REF_PROFILE else None
+            if ref:                                  # match the reference's loudness too
+                tgt = min(-5.0, max(-20.0, float(ref.get("lufs", tgt))))
             threading.Thread(target=run_enhance,
-                             args=(job_id, src, workdir, genre, tgt, linphase, use_stems), daemon=True).start()
+                             args=(job_id, src, workdir, genre, tgt, linphase, use_stems, ref), daemon=True).start()
         elif u.path == "/aimix":
             try:
                 mix_lufs = float((q.get("lufs") or ["-16"])[0])
@@ -344,6 +354,44 @@ class Handler(BaseHTTPRequestHandler):
         else:
             threading.Thread(target=run_job, args=(job_id, src, workdir), daemon=True).start()
         self._json(200, {"id": job_id})
+
+    def _handle_setref(self):
+        """Analyze an uploaded reference track and store it as the active
+        reference-match target. Fast (analysis only, no model)."""
+        with LOCK:
+            busy = JOB["state"] == "running"
+        if busy:
+            self._json(429, {"error": "engine busy — wait for the current job"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_UPLOAD:
+            self._json(400, {"error": "bad upload size"})
+            return
+        name = os.path.basename(self.headers.get("X-Filename") or "reference")
+        name = re.sub(r"[^A-Za-z0-9._ &()'-]", "_", name) or "reference"
+        src = tempfile.mktemp(suffix=".wav")
+        remaining, chunk = length, 1 << 20
+        with open(src, "wb") as fh:
+            while remaining > 0:
+                data = self.rfile.read(min(chunk, remaining))
+                if not data:
+                    break
+                fh.write(data); remaining -= len(data)
+        try:
+            import engine
+            prof = engine.ref_profile(src)
+            prof["name"] = name
+            with LOCK:
+                REF_PROFILE.clear(); REF_PROFILE.update(prof)
+        except Exception as e:  # noqa: BLE001
+            print(f"setref failed: {e}", file=sys.stderr)
+            self._json(500, {"error": str(e)[:240]})
+            return
+        finally:
+            try: os.unlink(src)
+            except OSError: pass
+        self._json(200, {"ok": True, "name": name, "lufs": prof["lufs"],
+                         "crest": prof["crest"], "corr": prof["corr"]})
 
     def _handle_fx(self):
         """Apply one FX op (dereverb/reverb) to an uploaded stem and return the
