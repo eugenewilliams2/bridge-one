@@ -399,7 +399,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4v6m0 4v6M12 4v9m0 4v3M19 4v3m0 4v9"/><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="15" r="2" fill="currentColor"/><circle cx="19" cy="9" r="2" fill="currentColor"/></svg>
         AI MIX (AUTO-BALANCE)</button>
       <select id="mixGenreSel" aria-label="Mix genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;flex:0 0 auto">
-        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
     <div id="stemList"></div>
@@ -465,12 +465,16 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
         AI ENHANCE (DEEP ENGINE)</button>
       <select id="genreSel" aria-label="Genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;">
-        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+        <option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
     <button class="phaseToggle" id="btnLinphase" role="switch" aria-checked="false" aria-label="Linear-phase processing">
       <span class="dot"></span><span>LINEAR PHASE</span>
       <span class="hint2">phase-coherent · zero smearing · slower render</span>
+    </button>
+    <button class="phaseToggle" id="btnDeep" role="switch" aria-checked="false" aria-label="Deep stem-based mastering">
+      <span class="dot"></span><span>DEEP (STEMS)</span>
+      <span class="hint2">per-stem AI processing · ~10× slower</span>
     </button>
 
     <div class="chatPanel" id="masterChat">
@@ -1283,10 +1287,14 @@ splitPicker.addEventListener("change",()=>{
 
 /* ---------- Deep Split engine (local Demucs server, auto-detected) ---------- */
 const DEEP={url:"http://127.0.0.1:8765", ok:false, model:""};
-let linphase=false;
+let linphase=false, deepStems=false;
 $("btnLinphase").addEventListener("click",()=>{
   linphase=!linphase;
   $("btnLinphase").setAttribute("aria-checked",linphase?"true":"false");
+});
+$("btnDeep").addEventListener("click",()=>{
+  deepStems=!deepStems;
+  $("btnDeep").setAttribute("aria-checked",deepStems?"true":"false");
 });
 async function deepCheck(){
   try{
@@ -1298,6 +1306,7 @@ async function deepCheck(){
   $("aiMixRow").style.display=DEEP.ok?"flex":"none";
   $("enhanceRow").style.display=DEEP.ok&&$("exportRow").classList.contains("on")?"flex":"none";
   $("btnLinphase").classList.toggle("on",DEEP.ok&&$("exportRow").classList.contains("on"));
+  $("btnDeep").classList.toggle("on",DEEP.ok&&$("exportRow").classList.contains("on"));
   $("splitLbl").textContent=DEEP.ok?"QUICK SPLIT (DSP)":"SPLIT FULL TRACK";
   $("deepNote").innerHTML=DEEP.ok
     ? " <b style='color:var(--gold)'>AI engine online</b> (demucs/"+esc(DEEP.model)+") — DEEP SPLIT gives studio-grade isolation; takes a few minutes per song."
@@ -1877,9 +1886,9 @@ async function aiEnhance(){
       body=new Blob([res.wav],{type:"audio/wav"}); name=fileName+".wav";
     }
     const genre=$("genreSel").value;
-    logLine("AI enhance <b>"+esc(name)+"</b> · "+genre+" · target "+P.tgt+" LUFS"+(linphase?" · linear phase":"")+" · demucs/"+esc(DEEP.model)+" · 100% on this machine");
+    logLine("AI enhance <b>"+esc(name)+"</b> · "+genre+" · target "+P.tgt+" LUFS · "+(deepStems?"deep (stems)":"fast (bus)")+(linphase?" · linear phase":"")+" · 100% on this machine");
     progShow("SENDING TO DEEP ENGINE",true);
-    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(P.tgt)+"&linphase="+(linphase?1:0),
+    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(P.tgt)+"&linphase="+(linphase?1:0)+"&deep="+(deepStems?1:0),
       {method:"POST",headers:{"X-Filename":name},body});
     if(r.status===429) throw new Error("engine is busy with another song");
     if(!r.ok) throw new Error("engine error "+r.status);

@@ -97,7 +97,16 @@ TARGETS = {
                        (800, 0), (1500, 0), (3000, 0.5), (5000, 1), (8000, 1.5), (12000, 2.5), (18000, 1)]),
     "pop":    _target([(25, 1), (45, 3.5), (80, 4), (120, 2.5), (200, 0.5), (400, -0.5),
                        (800, 0), (1500, 0.5), (3000, 1), (5000, 1.5), (8000, 1.5), (12000, 2.5), (18000, 1)]),
+    # Empirical — the median long-term spectrum of 8 real Travis Scott masters
+    # (ASTROWORLD-era): massive sub, dark recessed top, ~-8.3 LUFS. Derived from
+    # measured references, not hand-drawn.
+    "travis": _target([(25, 11.3), (45, 16.0), (80, 16.0), (120, 14.4), (200, 9.3), (400, 5.7),
+                       (800, -0.2), (1500, -3.7), (3000, -8.6), (5000, -10.7), (8000, -13.0),
+                       (12000, -16.0), (18000, -16.0)]),
 }
+# Per-genre reference loudness (from the same real masters). Used as the enhance
+# target when the caller doesn't override it.
+GENRE_LUFS = {"hiphop": -9.5, "rnb": -10.0, "pop": -9.5, "travis": -8.3}
 
 # ---------------------------------------------------------------- primitives
 def biquad(kind, sr, f0, Q, gain_db=0.0):
@@ -452,22 +461,65 @@ def stage_saturate(x, sr, actions):
     actions.append("bus: subtle tape-style saturation for warmth/density")
     return torch.tanh(x * drive) / math.tanh(drive)
 
+def _softclip(x, c, thr=0.88):
+    """Soft-clip everything above thr·c toward the ceiling (tanh knee) — flattens
+    peaks so the limiter needn't dip as deep, letting the average loudness rise.
+    A lower thr clips more of the waveform (harder maximization)."""
+    t = thr * c
+    xa = x.abs()
+    return torch.where(xa > t, torch.sign(x) * (t + (c - t) * torch.tanh((xa - t) / (c - t))), x)
+
+def _limit_peaks(x, sr, c):
+    """Lookahead true-peak limiter: g[i] = min(need[i..i+look]) guarantees
+    peak·g ≤ c at every sample; the 2.5 ms min-window spreads the gain change
+    so it isn't a per-sample brickwall. No valley-filling smoothing."""
+    look = max(4, int(0.0025 * sr))
+    peak = x.abs().amax(dim=0)
+    need = torch.clamp(c / peak.clamp(min=1e-9), max=1.0)
+    padn = torch.nn.functional.pad(need[None, None], (0, look), value=1.0)
+    g = -torch.nn.functional.max_pool1d(-padn, kernel_size=look + 1, stride=1)[0, 0]
+    return x * g, -20 * math.log10(float(g.min()) + 1e-9)
+
+def _fft_up4(x):
+    """Ideal band-limited 4× upsample via FFT zero-padding (fast, one FFT pair)."""
+    n = x.shape[1]
+    X = torch.fft.rfft(x, n)
+    Xp = torch.zeros(x.shape[0], (4 * n) // 2 + 1, dtype=X.dtype)
+    Xp[:, :X.shape[1]] = X
+    return torch.fft.irfft(Xp, 4 * n) * 4.0
+
+def _fft_down4(y, n):
+    """Inverse of _fft_up4: 4× downsample back to n samples."""
+    Y = torch.fft.rfft(y, y.shape[1])
+    return torch.fft.irfft(Y[:, :n // 2 + 1], n) / 4.0
+
+def _tp_limit(x, sr, ceiling_db):
+    """True-peak limiter: FFT-oversample 4×, limit with a tiny lookahead (the
+    inter-sample overshoots sit within one base sample, so a ~16-sample window
+    at 4× catches them and keeps max_pool cheap), then downsample back."""
+    c = 10 ** ((ceiling_db - 1.0) / 20)
+    n = x.shape[1]
+    up = _fft_up4(x)
+    look = 16
+    peak = up.abs().amax(dim=0)
+    need = torch.clamp(c / peak.clamp(min=1e-9), max=1.0)
+    padn = torch.nn.functional.pad(need[None, None], (0, look), value=1.0)
+    g = -torch.nn.functional.max_pool1d(-padn, kernel_size=look + 1, stride=1)[0, 0]
+    return _fft_down4(up * g, n)
+
 def stage_loudness(x, sr, target_lufs, ceiling_db, actions):
-    cur = lufs(x, sr)
-    x = x * 10 ** ((target_lufs - cur) / 20)
-    c = 10 ** ((ceiling_db - 0.3) / 20)
-    look = max(8, int(0.0015 * sr))
-    a = x.abs().max(dim=0).values
-    target = c / sliding_max(a, look).clamp(min=c)
-    # lookahead = sliding minimum; pad with unity gain so edges stay sane
-    padded = torch.nn.functional.pad(-target[None, None], (look, look), value=-1.0)
-    g = -torch.nn.functional.max_pool1d(padded, kernel_size=2 * look + 1, stride=1)[0, 0]
-    gr_db = -20 * math.log10(float(g.min()) + 1e-9)
-    g = onepole(g[None], sr, 40)[0].clamp(max=1.0)
-    y = (x * g).clamp(-c, c)
-    tp = true_peak_db(y, sr)
-    if tp > ceiling_db:
-        y = y * 10 ** ((ceiling_db - tp) / 20)
+    c = 10 ** ((ceiling_db - 0.3) / 20)                 # base-rate limiter target
+    gain_db = target_lufs - lufs(x, sr)
+    y, gr_db = x, 0.0
+    for it in range(5):                                 # drive into clip+limiter until it lands on target
+        thr = max(0.45, 0.9 - 0.11 * it)                # clip harder each pass if we're still short
+        y, gr_db = _limit_peaks(_softclip(x * 10 ** (min(gain_db, 24.0) / 20), c, thr), sr, c)
+        err = target_lufs - lufs(y, sr)
+        if abs(err) < 0.5:
+            break
+        gain_db += err
+    if true_peak_db(y, sr) > ceiling_db:               # only oversample-limit if inter-sample peaks are over
+        y = _tp_limit(y, sr, ceiling_db)
     actions.append(f"bus: normalized to {target_lufs} LUFS, true-peak limited "
                    f"(max GR {gr_db:.1f} dB, ceiling {ceiling_db} dBTP)")
     return y

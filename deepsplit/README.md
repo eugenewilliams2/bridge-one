@@ -99,6 +99,14 @@ glue with tube color), **vintageeq** (Pultec low boost-and-cut + air). Say
 re-applies the full cumulative set to the original master each time (no
 generation loss; `reset` clears it, `save` downloads the result).
 
+## Performance
+
+AI ENHANCE defaults to **fast bus mastering** (no stem separation) — ~7 s for a
+3-minute track vs ~60 s, and it scores equal-or-better on an already-mixed
+song (real mastering works on the stereo bus). Flip **DEEP (STEMS)** for the
+per-stem path when you want it. The true-peak limiter is FFT-oversampled and
+only engages when inter-sample peaks are actually over ceiling.
+
 ## Tuning
 
 - `BRIDGESPLIT_MODEL=htdemucs_ft` — maximum separation quality, ~4× slower
