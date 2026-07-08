@@ -90,23 +90,30 @@ def _target(points):
     f = np.array([p[0] for p in points]); g = np.array([p[1] for p in points])
     return np.interp(np.log10(BAND_HZ), np.log10(f), g)
 
+# Genre targets — the median long-term spectrum of real commercial masters
+# (12 tracks/genre via iTunes; Travis from 8). The very top (>10 kHz) is
+# tempered up from the raw measurement to undo AAC-preview rolloff. These are
+# how good masters ACTUALLY measure: bass-heavy, gently darkening top — not the
+# flat/bright shapes a naïve target assumes.
 TARGETS = {
-    "hiphop": _target([(25, 4), (45, 6.5), (80, 6.5), (120, 3.5), (200, 0.5), (400, -0.5),
-                       (800, -0.5), (1500, 0), (3000, 0), (5000, 0.5), (8000, 1), (12000, 2), (18000, 0.5)]),
-    "rnb":    _target([(25, 2.5), (45, 5), (80, 5), (120, 3), (200, 0.5), (400, -0.5),
-                       (800, 0), (1500, 0), (3000, 0.5), (5000, 1), (8000, 1.5), (12000, 2.5), (18000, 1)]),
-    "pop":    _target([(25, 1), (45, 3.5), (80, 4), (120, 2.5), (200, 0.5), (400, -0.5),
-                       (800, 0), (1500, 0.5), (3000, 1), (5000, 1.5), (8000, 1.5), (12000, 2.5), (18000, 1)]),
-    # Empirical — the median long-term spectrum of 8 real Travis Scott masters
-    # (ASTROWORLD-era): massive sub, dark recessed top, ~-8.3 LUFS. Derived from
-    # measured references, not hand-drawn.
-    "travis": _target([(25, 11.3), (45, 16.0), (80, 16.0), (120, 14.4), (200, 9.3), (400, 5.7),
-                       (800, -0.2), (1500, -3.7), (3000, -8.6), (5000, -10.7), (8000, -13.0),
-                       (12000, -16.0), (18000, -16.0)]),
+    "hiphop": _target([(25, 11), (45, 11), (80, 11), (120, 10), (200, 8.3), (400, 5.1),
+                       (800, 0.1), (1500, -3.1), (3000, -8.3), (5000, -10), (8000, -11),
+                       (12000, -11), (18000, -11)]),
+    "rnb":    _target([(25, 8), (45, 10), (80, 10), (120, 10), (200, 9.7), (400, 5),
+                       (800, 1), (1500, -3.1), (3000, -9.6), (5000, -11), (8000, -12),
+                       (12000, -12), (18000, -12)]),
+    "pop":    _target([(25, 5), (45, 10), (80, 10), (120, 10), (200, 7.7), (400, 5.3),
+                       (800, 1), (1500, -2.8), (3000, -9.7), (5000, -11), (8000, -11.5),
+                       (12000, -11.5), (18000, -11.5)]),
+    "travis": _target([(25, 12), (45, 16), (80, 16), (120, 14.4), (200, 9.3), (400, 5.7),
+                       (800, -0.2), (1500, -3.7), (3000, -8.6), (5000, -10.7), (8000, -12),
+                       (12000, -12), (18000, -12)]),
 }
-# Per-genre reference loudness (from the same real masters). Used as the enhance
-# target when the caller doesn't override it.
-GENRE_LUFS = {"hiphop": -9.5, "rnb": -10.0, "pop": -9.5, "travis": -8.3}
+# Per-genre reference loudness (median of the same real masters).
+GENRE_LUFS = {"hiphop": -8.9, "rnb": -10.2, "pop": -8.6, "travis": -8.3}
+# Per-genre reference correlation — how wide real masters in each lane actually
+# are. The imager uses this so it never over-widens past the genre norm.
+GENRE_CORR = {"hiphop": 0.90, "rnb": 0.85, "pop": 0.75, "travis": 0.90}
 
 # ---------------------------------------------------------------- primitives
 def biquad(kind, sr, f0, Q, gain_db=0.0):
@@ -633,21 +640,26 @@ def stage_stabilizer(x, sr, actions, amount=0.55, n_fft=2048, hop=512, keep=32):
                        f"tamed across the spectrum (≤{4.0 * amount:.0f} dB/peak)")
     return torch.stack(outs)
 
-def stage_multiband_image(x, sr, m, actions, linphase=False):
-    """Ozone Imager: width per band — lows mono, mids natural, highs opened.
-    Narrower sources get pushed wider; already-wide ones are left alone."""
-    corr = m["correlation"]
-    hi_w = 1.35 if corr > 0.9 else 1.15 if corr > 0.6 else 1.0
-    bands = split_bands(x, sr, [120, 2500], linphase)
-    widths = [0.0, 1.12, hi_w]          # low fully mono, mid gentle, high wide
-    out = None
-    for b, wd in zip(bands, widths):
-        mid = (b[0] + b[1]) * 0.5
-        side = (b[0] - b[1]) * 0.5 * wd
-        band = torch.stack([mid + side, mid - side])
-        out = band if out is None else out + band
-    actions.append(f"multiband imager: lows mono · mids natural · highs ×{hi_w:.2f} (mono-safe"
-                   + (", linear phase)" if linphase else ")"))
+def stage_multiband_image(x, sr, m, actions, target_corr=0.88, linphase=False):
+    """Ozone Imager: mono the lows for club/mono safety, then scale the overall
+    side energy toward the genre's real correlation — so a too-wide source gets
+    reined in and a too-narrow one gets opened, but neither past the norm."""
+    low, rest = split_bands(x, sr, [120], linphase)
+    lowm = (low[0] + low[1]) * 0.5
+    x2 = torch.stack([lowm, lowm]) + rest              # lows collapsed to mono
+    mid = (x2[0] + x2[1]) * 0.5
+    side = (x2[0] - x2[1]) * 0.5
+    scale = 1.0
+    for _ in range(4):                                   # converge side scale to hit target correlation
+        c = correlation(torch.stack([mid + side * scale, mid - side * scale]))
+        if abs(c - target_corr) < 0.02:
+            break
+        scale *= 1.18 if c > target_corr else 0.85       # wider if too correlated, narrower if too wide
+        scale = max(0.2, min(1.6, scale))
+    out = torch.stack([mid + side * scale, mid - side * scale])
+    verb = "widened" if scale > 1.03 else "narrowed" if scale < 0.97 else "held"
+    actions.append(f"multiband imager: lows mono · image {verb} to genre width "
+                   f"(corr → {correlation(out):.2f})" + (" · linear phase" if linphase else ""))
     return out
 
 def stage_exciter(x, sr, norm, target, actions):
@@ -757,7 +769,7 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
         x = stage_saturate(x, sr, actions)
 
     prog(86, "multiband stereo image")
-    x = stage_multiband_image(x, sr, m, actions, linphase)
+    x = stage_multiband_image(x, sr, m, actions, GENRE_CORR.get(genre, 0.88), linphase)
 
     prog(90, "loudness + true-peak limiting")
     x = stage_loudness(x, sr, target_lufs, ceiling_db, actions)
