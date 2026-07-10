@@ -135,6 +135,11 @@ GENRE_CORR = {"hiphop": 0.90, "rnb": 0.85, "pop": 0.75, "travis": 0.90, "toliver
 # when the caller doesn't override them. Lanes not listed use the enhance()
 # fallbacks (sub_control 0.6, clarity 0.6, and the caller's target LUFS).
 GENRE_PROFILE = {
+    # GQ GENO — the "v2" clarity voicing GQ picked: de-mud + slight de-box, vocal
+    # pushed forward at 3.2 kHz, a touch of air on top. Keeps the big 808 (gentle
+    # sub control). This is his signature master.
+    "geno":       {"sub_control": 0.6,
+                   "clarity_eq": {"mud": 2.0, "box": 1.0, "presence": 2.0, "air": 1.5}},
     "geno_punch": {"sub_control": 1.0, "clarity": 0.5, "target_lufs": -10.0},
 }
 
@@ -740,10 +745,33 @@ def stage_sub_control(x, sr, target, actions, strength=1.0):
     actions.append(f"sub control: -{cut:.1f} dB low-shelf at 80 Hz (sub was +{excess:.1f} dB over target — tightened so the vocal breathes)")
     return x
 
-def stage_clarity(x, sr, actions, strength=1.0):
-    """Vocal-forward move: shave low-mid mud (~300 Hz) and add a touch of
-    presence (~3 kHz) so the lead cuts without turning anything up. Small and
-    musical — a taste move on top of the target match, for melodic/vocal records."""
+def stage_clarity(x, sr, actions, strength=1.0, eq=None):
+    """Vocal + music clarity. Two modes:
+
+    • simple (default) — shave low-mid mud (~300 Hz) + a touch of presence
+      (~3.2 kHz) scaled by `strength`. Unchanged behaviour for the generic lanes.
+    • tuned — when `eq` is a dict, apply an explicit 4-band clarity treatment
+      (dB amounts): `mud` cut ~300 Hz, `box` cut ~520 Hz (music congestion),
+      `presence` boost ~3.2 kHz (vocal cuts), `air` high-shelf ~10.5 kHz
+      (openness/separation up top). This is how the GQ GENO lane is voiced.
+
+    All boosts stay gentle and the top shelf sits above the sibilance band, so
+    it reads as air, not ess."""
+    if eq:
+        mud = float(eq.get("mud", 0.0)); box = float(eq.get("box", 0.0))
+        pres = float(eq.get("presence", 0.0)); air = float(eq.get("air", 0.0))
+        parts = []
+        if mud > 0.05:
+            x = apply_biquad(x, *biquad("peak", sr, 300, 1.1, -min(4.0, mud))); parts.append(f"-{min(4.0,mud):.1f}@300")
+        if box > 0.05:
+            x = apply_biquad(x, *biquad("peak", sr, 520, 1.2, -min(3.0, box))); parts.append(f"-{min(3.0,box):.1f}@520")
+        if pres > 0.05:
+            x = apply_biquad(x, *biquad("peak", sr, 3200, 0.9, min(3.5, pres))); parts.append(f"+{min(3.5,pres):.1f}@3.2k")
+        if air > 0.05:
+            x = apply_biquad(x, *biquad("highshelf", sr, 10500, 0.7, min(3.5, air))); parts.append(f"+{min(3.5,air):.1f}@air")
+        if parts:
+            actions.append("clarity: " + ", ".join(parts) + " (vocal + music separation)")
+        return x
     if strength <= 0:
         return x
     mud = min(2.5, 2.2 * strength)
@@ -757,7 +785,7 @@ def stage_clarity(x, sr, actions, strength=1.0):
 def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0,
             use_stems=True, model="htdemucs", device="cpu", linphase=False,
             ref_curve=None, ref_corr=None, ref_name=None, sub_control=None,
-            clarity=None, progress=None):
+            clarity=None, clarity_eq=None, progress=None):
     def prog(p, msg):
         if progress: progress(p, msg)
 
@@ -783,6 +811,8 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
         sub_control = prof.get("sub_control", 0.6)
     if clarity is None:
         clarity = prof.get("clarity", 0.6)
+    if clarity_eq is None:
+        clarity_eq = prof.get("clarity_eq")
     issues = detect_issues(m, norm, target)
     actions = []
     if ref_curve is not None:
@@ -839,7 +869,7 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
 
     prog(66, "sub control + clarity")
     x = stage_sub_control(x, sr, target, actions, strength=sub_control)
-    x = stage_clarity(x, sr, actions, strength=clarity)
+    x = stage_clarity(x, sr, actions, strength=clarity, eq=clarity_eq)
 
     prog(68, "low-end control")
     x = stage_low_control(x, sr, actions)
