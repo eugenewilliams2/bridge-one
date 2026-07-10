@@ -340,9 +340,15 @@ def score_result(x, sr, target, src_m, target_lufs):
     d = np.clip(ncs - target, -12, 12)
     wsum = float(w.sum()) + 1e-9
     dev = float(np.sqrt((w * d * d).sum() / wsum))
-    pres = region_db(nc, 2000, 5000)
-    mud = region_db(nc, 200, 500)
-    harsh = max(0.0, region_db(nc, 2500, 5000) - 3.0)
+    # presence/mud/harshness judged vs the genre target, not an absolute bright-mix
+    # assumption — so an intentionally dark, on-target hip-hop master isn't punished
+    # for being dark; only a master more buried/muddier than the genre norm is.
+    def treg(lo, hi):
+        sel = (BAND_HZ >= lo) & (BAND_HZ <= hi)
+        return float(target[sel].mean())
+    pres = region_db(nc, 2000, 5000) - treg(2000, 5000)   # + = more present than target
+    mud = region_db(nc, 200, 500) - treg(200, 500)        # + = muddier than target
+    harsh = max(0.0, (region_db(nc, 2500, 5000) - treg(2500, 5000)) - 3.0)
     cr = crest_db(x)
     co = correlation(x)
     lu = lufs(x, sr)
@@ -697,10 +703,41 @@ def stage_exciter(x, sr, norm, target, actions):
         actions.append("harmonic exciter: added " + " + ".join(changed) + " (generated harmonics, not just EQ)")
     return x
 
+def stage_sub_control(x, sr, target, actions, strength=1.0):
+    """When the mix sits well above the genre target below ~90 Hz, a low-shelf
+    pulls the sub toward target. The matching EQ caps at ±4 dB/pass and can't
+    fully tame a grossly hot 808; this does — a tighter, more translatable low
+    end that stops the sub from masking the vocal. Runs AFTER matching EQ so it
+    has the final say on the low, and only fires when the excess is real."""
+    _, spec = band_spectrum(x, sr)
+    nc = normalize_curve(spec)
+    sel = (BAND_HZ >= 35) & (BAND_HZ <= 90)
+    excess = float(nc[sel].mean()) - float(target[sel].mean())
+    if excess < 1.5 or strength <= 0:
+        return x
+    cut = min(6.0, (excess - 0.5) * strength)
+    x = apply_biquad(x, *biquad("lowshelf", sr, 80, 0.7, -cut))
+    actions.append(f"sub control: -{cut:.1f} dB low-shelf at 80 Hz (sub was +{excess:.1f} dB over target — tightened so the vocal breathes)")
+    return x
+
+def stage_clarity(x, sr, actions, strength=1.0):
+    """Vocal-forward move: shave low-mid mud (~300 Hz) and add a touch of
+    presence (~3 kHz) so the lead cuts without turning anything up. Small and
+    musical — a taste move on top of the target match, for melodic/vocal records."""
+    if strength <= 0:
+        return x
+    mud = min(2.5, 2.2 * strength)
+    pres = min(2.0, 1.6 * strength)
+    x = apply_biquad(x, *biquad("peak", sr, 300, 1.1, -mud))
+    x = apply_biquad(x, *biquad("peak", sr, 3200, 0.9, pres))
+    actions.append(f"clarity: -{mud:.1f} dB mud at 300 Hz + {pres:.1f} dB presence at 3.2 kHz (vocal cuts through)")
+    return x
+
 # ---------------------------------------------------------------- pipeline
 def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0,
             use_stems=True, model="htdemucs", device="cpu", linphase=False,
-            ref_curve=None, ref_corr=None, ref_name=None, progress=None):
+            ref_curve=None, ref_corr=None, ref_name=None, sub_control=0.6,
+            clarity=0.6, progress=None):
     def prog(p, msg):
         if progress: progress(p, msg)
 
@@ -773,6 +810,10 @@ def enhance(path_in, path_out, genre="hiphop", target_lufs=-9.5, ceiling_db=-1.0
         else:
             actions[-1] += " — reverted (no measurable improvement)"
     del y
+
+    prog(66, "sub control + clarity")
+    x = stage_sub_control(x, sr, target, actions, strength=sub_control)
+    x = stage_clarity(x, sr, actions, strength=clarity)
 
     prog(68, "low-end control")
     x = stage_low_control(x, sr, actions)
