@@ -406,7 +406,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4v6m0 4v6M12 4v9m0 4v3M19 4v3m0 4v9"/><circle cx="5" cy="12" r="2" fill="currentColor"/><circle cx="12" cy="15" r="2" fill="currentColor"/><circle cx="19" cy="9" r="2" fill="currentColor"/></svg>
         AI MIX (AUTO-BALANCE)</button>
       <select id="mixGenreSel" aria-label="Mix genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;flex:0 0 auto">
-        <option value="auto">AUTO-DETECT</option><option value="geno">GQ GENO</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="toliver">DON TOLIVER</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+        <option value="auto">AUTO-DETECT</option><option value="geno">GQ GENO</option><option value="geno_punch">GQ GENO — PUNCHY</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="toliver">DON TOLIVER</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
     <div id="stemList"></div>
@@ -472,7 +472,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
         AI ENHANCE (DEEP ENGINE)</button>
       <select id="genreSel" aria-label="Genre" style="background:var(--glass);color:var(--ink);border:1px solid var(--line-hi);border-radius:7px;min-height:44px;padding:0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;">
-        <option value="geno" selected>GQ GENO</option><option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="toliver">DON TOLIVER</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
+        <option value="geno" selected>GQ GENO</option><option value="geno_punch">GQ GENO — PUNCHY</option><option value="auto">AUTO-DETECT</option><option value="hiphop">HIP-HOP</option><option value="travis">TRAVIS</option><option value="toliver">DON TOLIVER</option><option value="rnb">R&amp;B</option><option value="pop">POP</option>
       </select>
     </div>
     <button class="phaseToggle" id="btnLinphase" role="switch" aria-checked="false" aria-label="Linear-phase processing">
@@ -1931,9 +1931,11 @@ async function aiEnhance(){
     }
     const genre=$("genreSel").value;
     const useRef=!!activeRef;
-    logLine("AI enhance <b>"+esc(name)+"</b> · "+(useRef?"matching <b>"+esc(activeRef.name)+"</b>":genre+" · target "+P.tgt+" LUFS")+" · "+(deepStems?"deep (stems)":"fast (bus)")+(linphase?" · linear phase":"")+" · 100% on this machine");
+    // some lanes want their own loudness (e.g. the PUNCHY lane masters more dynamic)
+    const LANE_LUFS={geno_punch:-10}, tgt=(LANE_LUFS[genre]??P.tgt);
+    logLine("AI enhance <b>"+esc(name)+"</b> · "+(useRef?"matching <b>"+esc(activeRef.name)+"</b>":genre+" · target "+tgt+" LUFS")+" · "+(deepStems?"deep (stems)":"fast (bus)")+(linphase?" · linear phase":"")+" · 100% on this machine");
     progShow("SENDING TO DEEP ENGINE",true);
-    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(P.tgt)+"&linphase="+(linphase?1:0)+"&deep="+(deepStems?1:0)+"&ref="+(useRef?1:0),
+    const r=await fetch(DEEP.url+"/enhance?genre="+encodeURIComponent(genre)+"&lufs="+encodeURIComponent(tgt)+"&linphase="+(linphase?1:0)+"&deep="+(deepStems?1:0)+"&ref="+(useRef?1:0),
       {method:"POST",headers:{"X-Filename":name},body});
     if(r.status===429) throw new Error("engine is busy with another song");
     if(!r.ok) throw new Error("engine error "+r.status);
