@@ -140,7 +140,10 @@ GENRE_PROFILE = {
     # sub control). This is his signature master.
     "geno":       {"sub_control": 0.6,
                    "clarity_eq": {"mud": 2.0, "box": 1.0, "presence": 2.0, "air": 1.5}},
-    "geno_punch": {"sub_control": 1.0, "clarity": 0.5, "target_lufs": -10.0},
+    # GQ GENO — PUNCHY: same v2 clarity voicing as the main lane, but tighter low
+    # and more dynamic (louder crest, a touch quieter).
+    "geno_punch": {"sub_control": 1.0, "target_lufs": -10.0,
+                   "clarity_eq": {"mud": 2.0, "box": 1.0, "presence": 2.0, "air": 1.5}},
 }
 
 # ---------------------------------------------------------------- primitives
