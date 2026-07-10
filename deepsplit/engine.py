@@ -111,12 +111,17 @@ TARGETS = {
     "toliver": _target([(25, 14.8), (45, 16), (80, 16), (120, 12.1), (200, 7.3), (400, 4.8),
                         (800, 0.9), (1500, -2.9), (3000, -8.2), (5000, -10.7), (8000, -12),
                         (12000, -12), (18000, -12)]),
+    # GQ GENO house curve — the melodic-trap voicing GQ picked in a blind A/B of
+    # his own track (started from the Toliver lane; tune this as his sound evolves).
+    "geno":   _target([(25, 14.8), (45, 16), (80, 16), (120, 12.1), (200, 7.3), (400, 4.8),
+                       (800, 0.9), (1500, -2.9), (3000, -8.2), (5000, -10.7), (8000, -12),
+                       (12000, -12), (18000, -12)]),
 }
 # Per-genre reference loudness (median of the same real masters).
-GENRE_LUFS = {"hiphop": -8.9, "rnb": -10.2, "pop": -8.6, "travis": -8.3, "toliver": -9.3}
+GENRE_LUFS = {"hiphop": -8.9, "rnb": -10.2, "pop": -8.6, "travis": -8.3, "toliver": -9.3, "geno": -9.3}
 # Per-genre reference correlation — how wide real masters in each lane actually
 # are. The imager uses this so it never over-widens past the genre norm.
-GENRE_CORR = {"hiphop": 0.90, "rnb": 0.85, "pop": 0.75, "travis": 0.90, "toliver": 0.89}
+GENRE_CORR = {"hiphop": 0.90, "rnb": 0.85, "pop": 0.75, "travis": 0.90, "toliver": 0.89, "geno": 0.89}
 
 # ---------------------------------------------------------------- primitives
 def biquad(kind, sr, f0, Q, gain_db=0.0):
@@ -1026,6 +1031,7 @@ MIX_BALANCE = {
     "hiphop": {"vocals": 0.0, "drums": -1.5, "bass": -2.5, "other": -5.5},
     "rnb":    {"vocals": 0.0, "drums": -3.0, "bass": -3.0, "other": -4.5},
     "pop":    {"vocals": 0.0, "drums": -2.5, "bass": -3.5, "other": -4.0},
+    "geno":   {"vocals": 0.0, "drums": -1.5, "bass": -2.5, "other": -5.5},  # GQ GENO — vocal-forward melodic trap
 }
 
 def widen(x, amt):
