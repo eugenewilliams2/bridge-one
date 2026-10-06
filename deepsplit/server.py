@@ -195,6 +195,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "X-Filename, Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        # lets the hosted site (GitHub Pages, https) reach this local engine in Chrome
+        self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def _json(self, code, obj):
         body = json.dumps(obj).encode()
